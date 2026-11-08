@@ -7,11 +7,13 @@
 
 ## 0. FIDELITY STATEMENT — READ THIS FIRST
 
-**This RTL has never been synthesized, never timing-closed, never placed on silicon, and no
-clock frequency is claimed anywhere in `rtl/`.**
+**This RTL has been synthesized (`tools/rtl-synth.sh`, sv2v + Yosys). It is not timing-closed,
+not placed or routed, never placed on silicon, and no clock frequency is claimed anywhere in
+`rtl/`.**
 
-- No synthesis tool exists on this host (`yosys` is absent). Nothing in this document is a
-  synthesis result, an area figure, a timing figure, or a frequency.
+- Nothing *in this document* is a synthesis result, an area figure, a timing figure, or a
+  frequency: everything recorded below is lint output or simulation output. The cell counts
+  live in `docs/STATUS.md` and are reproduced by `zig build synth`.
 - The clock period in the testbench is **stimulus**, not a timing result. It is not a period
   the design is known to meet.
 - Instruction counts here are **simulator counts**. They are not a performance claim.
@@ -169,7 +171,7 @@ $ /tmp/core_tb_sim
 === CLS64 rtl/core.sv testbench (contract v1.2) ===
 ...
 === checks=159 failures=0 ===
-PASS: all 159 core vectors matched (simulation only; RTL is NOT synthesized, NOT timing-closed, NOT on silicon)
+PASS: all 159 core vectors matched (simulation only; RTL is NOT timing-closed, NOT on silicon)
 ```
 
 `[PASS]` per group: P1, P2, P3, P3b, P4, P5, P6, P7, P8, P9, P10.
@@ -475,8 +477,9 @@ the §4/§5 constants are consumed for real, and anything genuinely dead still f
 
 ## 7. What is NOT verified — the honest gap list
 
-1. **Never synthesized, never timing-closed, never on silicon, no frequency known.** No
-   synthesis tool on this host.
+1. **Never timing-closed, never placed or routed, never on silicon, no frequency known.**
+   Synthesis itself now runs (`zig build synth`) and yields cell counts, but a cell count is
+   not a timing result and nothing has been mapped to a board.
 2. **`stream.*` is walked by the testbench.** The core issues the operation and gates
    retirement on the engine's handshake, but memory lives in the testbench. There is **no
    scoreboard and no hazard interlock**: a program that read a register mid-stream would read a
@@ -515,5 +518,5 @@ All results above are from a clean, unmutated tree.
 ---
 
 *Celeris-64 describes a chip that does not exist. This RTL is a lint-verified specification
-plus simulation. It has never been synthesized, never timing-closed, and never placed on
-silicon, and no clock frequency is claimed for it.*
+plus simulation, and it has now been synthesized to gates. It is not timing-closed, not placed
+or routed, and never placed on silicon, and no clock frequency is claimed for it.*

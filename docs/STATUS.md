@@ -132,15 +132,24 @@ Current, verified state. Superseded claims are removed rather than left to misle
   named `MODEL LIMITS: ...` so the claim is auditable.
 - `matrix.*`, `fft.*`, `codec.*`, capability checks and SMT threads are **software
   models**, per `docs/isa-encoding.md` §8. No acceleration, no cycle claims.
-- RTL (Phase 4) **is written and lint-clean**: `rtl/pkg/celeris64_pkg.sv`,
+- RTL (Phase 4) **is written, lint-clean, and now synthesized**. `rtl/pkg/celeris64_pkg.sv`,
   `regfile.sv`, `alu.sv`, `stream_engine.sv`, `select_unit.sv`, `field_unit.sv`,
   `core.sv`, `accel.sv`, plus three testbenches under `rtl/tb/`. Verilator 5.49 was
   installed via a prebuilt manylinux wheel into `~/.local/verilator` (no sudo, no
   source build). Whole-tree lint is clean and the testbenches run real assertions;
   see `rtl/CROSSCHECK.md`.
-  **This RTL has never been synthesized, never been timing-closed, and has no known
-  clock frequency.** `yosys` is absent. It is a lint-clean simulation model, not
-  silicon, and no document may claim otherwise.
+  **Synthesis works** (`zig build synth`, `tools/rtl-synth.sh`): 42,775 cells in
+  Yosys's generic flow, and 22,069 cells mapped to iCE40 primitives (15,076 LUT4,
+  4,924 carry, 2,063 flip-flops), flattened, 0 problems. That last figure exceeds an
+  iCE40 HX8K (7,680 LUT4s), so the design does not fit the smallest plausible target.
+  **It is still not timing-closed, not placed, not routed, and has no known clock
+  frequency.** A cell count is not a timing result. No document may claim a clock
+  frequency, a critical path, or an area-per-technology figure.
+  Getting here needed `sv2v`: Yosys's Verilog frontend rejects `return` inside a
+  function (which the package uses throughout) and rejects a part-select applied
+  directly to a function call. Verilator accepts both. One such part-select existed
+  in `rtl/stream_engine.sv` and was rewritten as an explicit width cast, which is why
+  the design now converts and synthesizes at all.
 - Cycle counts and benchmarks are **simulator instruction counts**, never a claim
   about silicon. Every benchmark line says "simulated" for that reason, and two
   tests enforce it.
@@ -755,3 +764,103 @@ Also corrected: `docs/fidelity.md`'s legend had no category for lint-clean-but-u
 RTL, so the new table row used a label the legend did not define. Added
 **Simulation-verified spec**, defined as weaker than a software model for correctness claims
 because no physical implementation exists to measure.
+
+### F17: the benchmark streamed over its own code, and no test could notice
+
+Found while writing `docs/comparison.md`, which forced the real number to be re-read against the
+source rather than recalled. `docs/fidelity.md` §3.4 quotes `stream batch: 4 simulated
+instructions`, but `zig build bench` printed **3**. The first instinct was a stale quote. It was
+not.
+
+**The defect.** Both benchmark programs set their stream pointer to address 0:
+
+```zig
+try words.append(arena, vm.encode(0x19, 1, 0, vm.aluOperand(0, .full, 0))); // R1 = 0
+```
+
+Address 0 is the program's own first instruction. `stream.add` then added the addend to the
+addend itself across the instruction words while the program ran:
+
+- **batch** (`chunk = 8`, 8-byte elements) covers bytes 0..63 — all four of its words, including
+  its `halt` at byte 24. The `halt` word `0x0100000000000000` became `0x0100000000000005`, which
+  the decoder correctly refuses ("a zero opcode with stray bits set"), so the run ended one
+  instruction early.
+- **scalar** (`chunk = 1`, 8-byte elements) covers bytes 0..47 and stops before its `halt` at
+  byte 80. It corrupts its own instructions but still halts, so its count of 11 was right by luck.
+
+Proven directly, not inferred: stepping the program showed `word[3] before stream =
+0x0100000000000000`, `after = 0x0100000000000005`.
+
+**Which number was wrong.** Git archaeology settled it. `bench.zig` was introduced in `40e0531`
+and `R1 = 0` was in it from the start; running `zig build bench` in a worktree at that exact
+commit prints **3**. So the benchmark never printed 4: `docs/fidelity.md` recorded the value the
+program was *supposed* to produce, in the same commit batch that failed to produce it, one second
+apart. The doc described the intent; the code disagreed; nobody ran the two against each other.
+
+**Why nothing caught it.** Every existing assertion was relational:
+
+```zig
+try testing.expect(results.batch.instructions > 0);
+try testing.expect(results.batch.instructions < results.scalar.instructions);
+```
+
+`3 < 11` passes exactly as happily as `4 < 11`. **No test asserted a count against a number.** A
+program that silently truncated its own execution looked identical to a correct one, because the
+only thing being checked was an inequality between two quantities that had both been distorted.
+
+The fix sets the stream pointer to `data_base` (`1 << 12`), past any program these benchmarks
+build. Batch now reports 4, matching the doc.
+
+**Two tests added, and both are proven to fire.** Reverting `batchWords` to address 0 in a
+throwaway copy fails them with `expected 4, found 3` and a self-modification byte mismatch.
+
+The second test deserves a note. Its first version rebuilt the batch program inline instead of
+calling `batchWords`, and it did **not** fire under mutation: it was testing a hand-copy of the
+program, so the real builder could regress while the test stayed green — the same trap, one level
+up. It now runs the actual builders, which is why `batchWords`/`scalarWords` are split out from
+`batchAdd`/`scalarLoop` at all. A test that duplicates the thing it guards guards nothing.
+
+**The pattern.** This is the first defect this session whose wrong value was in the *docs* and
+whose *code* was the liar — every earlier one was the reverse. It is also the first found by
+noticing two numbers disagree, rather than by running something new. Both numbers existed,
+printed by the same repository, for the entire life of the project; nothing compared them.
+
+### F18: "never been synthesized" was true for exactly as long as nobody tried
+
+Same class as F16, caught the same way and on the same day. The repository asserted in **8
+files, 15 places** that the RTL had never been synthesized:
+
+- `docs/STATUS.md`: "This RTL has never been synthesized ... `yosys` is absent."
+- `docs/fidelity.md` §4 heading: "RTL exists and is lint-verified; synthesis has not started"
+- `README.md`: "RTL is written and lint-clean, but has never been synthesized or timing-closed"
+- `rtl/CROSSCHECK.md` (three places), `tests/rtl_checks.md` (three places)
+- `rtl/tb/alu_tb.sv`, `rtl/tb/core_tb.sv` — testbench messages printed **at runtime**
+
+The claim was true when written, and "`yosys` is absent" was true at the time. It stopped being
+true when the OSS CAD Suite was installed to `~/.local/oss-cad-suite` earlier in the same session.
+Nobody re-read the sentences, because nothing links "I installed a toolchain" to "a document says
+the toolchain is absent."
+
+**What actually blocked synthesis was not toolchain absence but one line of source.**
+`rtl/stream_engine.sv` contained:
+
+```systemverilog
+lane_msk_q = width_mask(elem_width_q)[BYTE_LANES-1:0];
+```
+
+a part-select applied directly to a function call. Verilator accepts this; Yosys's Verilog frontend
+rejects it with `syntax error, unexpected '['`. The package also uses `return` inside functions
+throughout, which Yosys rejects and which needs `sv2v` to lower. Both blockers were **in the
+source**, not in the tooling, and both were invisible while the only tool ever run was Verilator —
+a linter that accepts more than a synthesizer does.
+
+The fix is one line: `lane_msk_q = BYTE_LANES'(width_mask(elem_width_q));` — an explicit width
+cast. Verilator stayed at 0 warnings; the three testbenches re-ran at 80/80, 314/314 and 159/159;
+and the whole design then converted with `sv2v` and synthesized with Yosys.
+
+**The pattern, and why it keeps recurring.** F16, F17 and F18 are one defect wearing three hats:
+a statement true at the time it was written, falsified by later work, and never re-read. Nothing in
+this repository connects a change to the documents that deny it. F17 was caught because two numbers
+disagreed and a human noticed; F18 because running a linter is not running a synthesizer and a
+human noticed. Both were noticed by accident. There is no mechanism here that would have caught
+either, and "we will remember to re-read the docs" is not a mechanism.

@@ -13,7 +13,8 @@
 // and it is asserted against a real byte array, not described in a comment.
 //
 // FIDELITY (docs/isa-encoding.md §8): SIMULATION of a lint-verified specification.
-// NEVER synthesized, never timing-closed, never on silicon, no frequency claimed.
+// The design is now synthesized (tools/rtl-synth.sh); this testbench was not part
+// of that. Still never timing-closed, never on silicon, no frequency claimed.
 //
 // Testbench hygiene: rtl/ synthesizable modules contain no `initial` and no `#`
 // delays; this file is under rtl/tb/ and is the only place either appears. There is

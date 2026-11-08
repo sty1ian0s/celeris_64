@@ -16,7 +16,9 @@
 // core's pipeline expects; it is stated here because it is not visible in the code.
 //
 // FIDELITY (docs/isa-encoding.md §8): lint-verified specification + simulation.
-// NEVER synthesized, never timing-closed, never on silicon. No frequency claimed.
+// Synthesized (tools/rtl-synth.sh, Yosys + sv2v): see docs/STATUS.md. Still NOT
+// timing-closed, NOT placed/routed, never on silicon. No frequency is claimed:
+// a cell count is not a timing result.
 //=============================================================================
 
 module regfile

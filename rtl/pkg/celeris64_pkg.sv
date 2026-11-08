@@ -24,8 +24,10 @@
 // recorded in the task report.
 //
 // FIDELITY (docs/isa-encoding.md §8): this package is a lint-verified
-// specification only. It has NEVER been synthesized, never timing-closed,
-// never placed on silicon. No clock frequency is claimed anywhere in rtl/.
+// specification, and it is now synthesized along with the rest of the design
+// (tools/rtl-synth.sh). It is still NOT timing-closed and never placed on
+// silicon. No clock frequency is claimed anywhere in rtl/, and a cell count is
+// not a timing result.
 //=============================================================================
 
 `ifndef CELERIS64_PKG_SV

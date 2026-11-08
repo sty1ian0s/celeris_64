@@ -23,8 +23,9 @@
 // the tool raise TIMESCALEMOD against every module that lacks it.
 //
 // FIDELITY (docs/isa-encoding.md §8): SIMULATION of a lint-verified specification.
-// NEVER synthesized, never timing-closed, never on silicon. The clock period below
-// is testbench STIMULUS, not a timing result; NO clock frequency is claimed.
+// The design is now synthesized (tools/rtl-synth.sh), but this testbench was not
+// part of that. Still never timing-closed, never on silicon. The clock period
+// below is testbench STIMULUS, not a timing result; NO clock frequency is claimed.
 //
 // LIMIT (matching rtl/core.sv's header): memory and the instruction fetch live
 // here, so `stream.*` is walked by this testbench. Each instruction is settled to
@@ -1109,7 +1110,7 @@ module core_tb
       checks++;
       $display("=== checks=%0d failures=%0d ===", checks, failures);
       if (failures == 0) begin
-        $display("PASS: all %0d core vectors matched (simulation only; RTL is NOT synthesized, NOT timing-closed, NOT on silicon)", checks);
+        $display("PASS: all %0d core vectors matched (simulation only; RTL is NOT timing-closed, NOT on silicon)", checks);
         $finish;
       end else begin
         $display("FAIL: %0d of %0d core vectors mismatched", failures, checks);

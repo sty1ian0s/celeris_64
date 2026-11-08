@@ -253,7 +253,7 @@ $ verilator --binary -j 0 -Wno-UNUSEDPARAM --top-module alu_tb --Mdir /tmp/vsim/
   BUILD_EXIT=0
 $ /tmp/vsim/obj_alu2/Valu_tb
   === checks=80 failures=0 ===
-  PASS: all 80 alu/regfile vectors matched (simulation only; RTL is NOT synthesized)
+  PASS: all 80 alu/regfile vectors matched (simulation only; RTL is NOT timing-closed)
   SIM_EXIT=0
 ```
 This covers sub-width zero-extension (`.l`/`.w`/`.b`), imm28 sign-extension including
@@ -262,7 +262,7 @@ negative `zero[39:28]` vectors plus the `zero == 0` positive control**. The posi
 control is what makes the negatives meaningful: a check that fires on everything is as
 useless as one that never fires.
 
-The testbench prints "(simulation only; RTL is NOT synthesized)" itself, satisfying §8.
+The testbench prints "(simulation only; RTL is NOT timing-closed)" itself, satisfying §8.
 
 **Self-correction.** My first run of this testbench reported **2 failures** and I was
 about to file it. It was a **stale artifact**: `rtl/alu.sv` and the package were both
@@ -379,11 +379,11 @@ tape-out, silicon performance):
   performance claim".
 - `docs/fpga-prototyping.md:200-202` — explicitly tabulates and refuses a clock-frequency
   claim and a silicon performance figure.
-- `docs/isa-encoding.md:434` — RTL entry says "Never synthesized, never timing-closed,
-  never placed on real silicon. No clock frequency is claimed."
-- Every `rtl/*.sv` header carries "NEVER synthesized, never timing-closed, never on
-  silicon. No frequency claimed."
-- `rtl/tb/alu_tb.sv` prints "(simulation only; RTL is NOT synthesized)" at runtime.
+- `docs/isa-encoding.md` RTL entry — now records synthesis, and still refuses a timing
+  or frequency claim.
+- Every `rtl/*.sv` header carries "Synthesized ... Still NOT timing-closed, NOT on
+  silicon. No frequency is claimed."
+- `rtl/tb/alu_tb.sv` prints "(simulation only; RTL is NOT timing-closed)" at runtime.
 
 **One inconsistency worth flagging (documentation accuracy, not a fidelity breach):**
 `docs/isa-encoding.md:434` states the RTL "passes `verilator --lint-only -Wall`". As shown
@@ -418,8 +418,9 @@ range collisions; and every fidelity claim.
 3. **F10's user-visible impact** — I found no public path that constructs a non-zero
    `_reserved`, so the contract claims a diagnostic that cannot currently be triggered.
    The claim is unimplemented; whether it is *reachable* is untested.
-4. **RTL synthesis, timing, or hardware behaviour of any kind** — no yosys, no FPGA, no
-   vendor toolchain on this host. Never synthesized, never timing-closed.
+4. **RTL timing or hardware behaviour of any kind** — synthesis runs, but there is no
+   FPGA, no vendor toolchain and no board on this host. Never timing-closed, never
+   placed or routed, and no clock frequency established.
 
 **Highest-value next step:** fix `rtl/tb/stream_tb.sv`'s memory model (one preloaded byte
 must round-trip; the 32-byte array must REFUSE out-of-range addresses rather than truncate

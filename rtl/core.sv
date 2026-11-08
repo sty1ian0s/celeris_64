@@ -28,10 +28,12 @@
 //   vector and rtl/CROSSCHECK.md cross-checks it against the Zig VM.
 //
 // FIDELITY (docs/isa-encoding.md §8) — READ BEFORE QUOTING ANY NUMBER:
-//   Lint-verified specification plus SIMULATION. NEVER synthesized (no yosys on
-//   this host), never timing-closed, never placed on silicon. NO clock frequency
-//   is claimed anywhere in rtl/. The testbench clock period is stimulus, not a
-//   timing result. One clock domain; multi-clock and CDC are out of scope.
+//   Lint-verified specification, SIMULATION, and now SYNTHESIS (tools/rtl-synth.sh
+//   via sv2v + Yosys; cell counts in docs/STATUS.md). Still NOT timing-closed, NOT
+//   placed or routed, never on silicon. NO clock frequency is claimed anywhere in
+//   rtl/. The testbench clock period is stimulus, not a timing result. One clock
+//   domain; multi-clock and CDC are out of scope. A cell count is not a timing
+//   result, and synthesis is not a performance claim.
 //   Instruction counts are simulator counts, not a performance claim.
 //
 // IMPLEMENTATION LIMITS — stated here and in CROSSCHECK.md, never hidden:

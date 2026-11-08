@@ -131,10 +131,12 @@ Stated plainly, because the difference between "modelled" and "working" matters:
   *Not wired is not the same as broken.*
 - `matrix.*`, `fft.*`, `codec.*`, capability checks and SMT threads are
   **software models**, not hardware. No acceleration, no cycle claims.
-- **RTL is written and lint-clean, but has never been synthesized or timing-closed
-  and has no known clock frequency.** Verilator 5.49 runs three testbenches with
-  real assertions (`rtl/`, `rtl/CROSSCHECK.md`). `yosys` is absent, so no synthesis
-  claim of any kind is made. On GCC 15 the testbenches need two workarounds: add
+- **RTL is written, lint-clean, and synthesized to gates; it is not timing-closed and
+  has no known clock frequency.** Verilator 5.49 runs three testbenches with real
+  assertions (`rtl/`, `rtl/CROSSCHECK.md`). `zig build synth` reports 42,775 cells in
+  Yosys's generic flow and 22,069 mapped to iCE40 primitives (15,076 LUT4) - more than
+  an HX8K holds. Cells are not timing: no frequency, no critical path, no area claim.
+  On GCC 15 the testbenches need two workarounds: add
   `-CFLAGS -fcoroutines` (GCC 15 requires it explicitly for `--timing`) and pass
   `-MAKEFLAGS CFG_GCH_IF_CLANG=.gch` (GCC 15 names precompiled headers `.gch`, which
   Verilator 5.49's makefile does not expect). Without them the C++ build fails; the

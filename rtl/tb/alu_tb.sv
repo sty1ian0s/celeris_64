@@ -7,7 +7,8 @@
 // wrong encoding fails rather than agreeing with itself.
 //
 // FIDELITY (docs/isa-encoding.md §8): this is SIMULATION of a lint-verified
-// specification. It has never been synthesized, never timing-closed, never on
+// specification. The design has since been synthesized (tools/rtl-synth.sh) and
+// this testbench was NOT part of that: it is still never timing-closed, never on
 // silicon, and no clock frequency is claimed.
 //
 // Testbench hygiene: rtl/ synthesizable modules contain no `initial` and no
@@ -17,7 +18,7 @@
 // are forbidden one, and a testbench-local timescale makes Verilator raise
 // TIMESCALEMOD against every module that lacks it. The clock period below is a
 // testbench stimulus interval only — no clock frequency is claimed for the RTL,
-// which has never been synthesized (contract §8).
+// which is not timing-closed (contract §8).
 //=============================================================================
 
 module alu_tb
@@ -89,7 +90,7 @@ module alu_tb
 
   //---------------------------------------------------------------------------
   // Clock. 10 ns period, purely a testbench artefact: no timing claim is made
-  // about the RTL, which has never been synthesized (contract §8).
+  // about the RTL, which is not timing-closed (contract §8).
   //---------------------------------------------------------------------------
   initial clk = 1'b0;
   always #5 clk = ~clk;
@@ -528,7 +529,7 @@ module alu_tb
     // =======================================================================
     $display("=== checks=%0d failures=%0d ===", checks, failures);
     if (failures == 0) begin
-      $display("PASS: all %0d alu/regfile vectors matched (simulation only; RTL is NOT synthesized)", checks);
+      $display("PASS: all %0d alu/regfile vectors matched (simulation only; RTL is NOT timing-closed)", checks);
       $finish;
     end else begin
       $display("FAIL: %0d of %0d vectors mismatched", failures, checks);

@@ -64,9 +64,11 @@ Legend for **What it is**:
   can, with limits that are named in the file and cited below.
 - **Spec artifact** — a document or description, not running code.
 - **Simulation-verified spec** — RTL that elaborates and passes testbenches
-  under a simulator. Explicitly *not* synthesized, *not* timing-closed, and not
-  hardware. Weaker than a software model for correctness claims, because no
-  physical implementation exists to measure.
+  under a simulator. Some of it is now also synthesized to gates, which is
+  recorded per row. Explicitly *not* timing-closed and not hardware: synthesis
+  establishes that the design maps to cells, nothing about how fast it runs.
+  Weaker than a software model for correctness claims, because no physical
+  implementation exists to measure.
 - **Not started** — does not exist.
 
 | Subsystem | What it is | Evidence (command actually run) | Observed result |
@@ -92,7 +94,7 @@ Legend for **What it is**:
 | Networking (`src/stdlib_net.zig`) | Software model — **performs no network I/O at all** | `~/.local/zig/zig test src/stdlib_net.zig` | All 13 tests passed |
 | Benchmarks (`benchmarks/bench.zig`) | Advisory simulator counts only | `~/.local/zig/zig build bench` | 4 tests passed; prints 8 lines, each containing "simulated" |
 | Independent verifier suite (`tests/vm_tests.zig`) | Executable model | `~/.local/zig/zig build test` | 37 tests passed |
-| RTL / SystemVerilog (`rtl/`) | **Simulation-verified spec** — lints clean, three testbenches pass; NOT synthesized | `verilator --lint-only -Wall --top-module core` | 0 warnings. See §4. |
+| RTL / SystemVerilog (`rtl/`) | **Simulation-verified spec** — lints clean, three testbenches pass, and synthesizes to gates; NOT timing-closed | `verilator --lint-only -Wall --top-module core`; `zig build synth` | 0 lint warnings. 42,775 generic cells / 22,069 iCE40 cells (15,076 LUT4). See §4. |
 | FPGA procedure | **Spec artifact, NOT EXECUTED** | see `docs/fpga-prototyping.md` | **Never run.** No synthesis toolchain and no board. See §4. |
 
 ---
@@ -178,14 +180,14 @@ grep -inE "speedup|faster|%|cycle|throughput|ghz" /tmp/bench.txt # -> no matches
 
 ---
 
-## 4. RTL and FPGA: RTL exists and is lint-verified; synthesis has not started
+## 4. RTL and FPGA: RTL exists, is lint-verified, and is now synthesized (not timing-closed)
 
 | Item | Status |
 |------|--------|
 | `rtl/` SystemVerilog | **Exists** — 11 files, second implementation of §2-§5. Lint-clean under `verilator --lint-only -Wall --top-module core`. |
 | Verilator | **Installed** at `~/.local/verilator/bin/verilator` (5.49, no sudo). Note `command -v verilator` returns nothing because `~/.local/bin` is not on `PATH` — the recorded check was misleading, not the tool. |
 | Icarus Verilog | **Not installed** |
-| Yosys | **Not installed** — so no synthesis claim of any kind is possible here. |
+| Yosys | **Installed** at `~/.local/oss-cad-suite/bin/yosys` (0.70+360, no sudo). Together with `sv2v` at `~/.local/sv2v/bin/sv2v` it synthesizes the design: `zig build synth`. |
 | GTKWave | **Not installed** |
 | Constraint file for any board | **Does not exist.** No `.xdc`, `.pcf`, `.lpf` or `.sdc` anywhere. |
 | `sudo` | Unavailable. `sudo -n true` -> "interactive authentication is required". |
