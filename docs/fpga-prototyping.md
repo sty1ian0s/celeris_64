@@ -1,27 +1,31 @@
 # Celeris-64 FPGA Prototyping Procedure
 
 Document Version: 1.0
-Status: **NOT EXECUTED — PROCEDURE ONLY.**
+Status: **SYNTHESIS RUNS; BOARD BRING-UP NOT EXECUTED.**
 
-> ## ⚠ THIS PROCEDURE HAS NEVER BEEN RUN
+> ## ⚠ SYNTHESIS NOW RUNS; BOARD BRING-UP HAS NOT
 >
-> Nothing in this document has been executed in this repository. There is no
-> FPGA board, no vendor toolchain, and no synthesis flow installed on this
-> machine: Icarus Verilog, Yosys and GTKWave are all absent, and `sudo` is
-> unavailable. There is no constraint file for any board (`.xdc`, `.pcf`, `.lpf`
-> or `.sdc`), so no board target exists to synthesize against.
+> The toolchain blockers in earlier revisions of this file are gone. The OSS CAD
+> Suite is installed at `~/.local/oss-cad-suite` (Yosys 0.70, nextpnr, iverilog,
+> GTKWave) and `sv2v` at `~/.local/sv2v`. **Synthesis runs today**: `zig build
+> synth` reports 42,775 cells in Yosys's generic flow, and 22,069 cells mapped to
+> iCE40 primitives (15,076 LUT4, 4,924 carry, 2,063 flip-flops). The iCE40 figure
+> exceeds an HX8K (7,680 LUT4s), so this design does not fit the smallest plausible
+> target. That is a measured result, not an estimate.
 >
-> Verilator **is** installed (5.49, without sudo) and `rtl/` **does** exist —
-> both statements to the contrary in earlier revisions of this file were stale
-> and have been corrected. The RTL lints clean and three testbenches pass under
-> simulation. **None of that is synthesis.** Verilator elaborates and simulates;
-> it does not map to gates, does not place and route, and does not produce a
-> bitstream. Every step below still remains unexecuted.
+> **Everything about a physical board remains unexecuted.** There is no FPGA, no
+> vendor toolchain, and still no constraint file for any board (`.xdc`, `.pcf`,
+> `.lpf` or `.sdc`), so there is no board target to synthesize *against*. No step
+> below has been run, no bitstream exists, and nothing has been placed, routed,
+> timed or loaded onto silicon.
 >
-> What follows is what a person *would* do, written down precisely, so that the
-> work is specified rather than implied. **Do not read any step below as
-> completed.** Anything you find here that looks like a measurement is a
-> description of a measurement that was never taken.
+> **A cell count is not a timing result.** No clock frequency, no critical path and
+> no resource-utilisation figure for a real part is claimed anywhere in this
+> repository. Synthesis establishes that the design maps to gates and says nothing
+> about how fast it runs.
+>
+> What follows is what a person *would* do for board bring-up, written down
+> precisely. **Do not read any step below as completed.**
 
 This document is the Phase 4 procedure from `celeris_64-implementation-roadmap.md`.
 It is a **specification artifact**. For the consolidated status of every
@@ -37,7 +41,9 @@ that is verified **in simulation only** — elaboration and testbenches, never
 gates. Writing an FPGA procedure that has not been executed is only honest if it
 says so on its face, which is why this section is first rather than last.
 
-The single most valuable word in this file is **NOT EXECUTED**.
+The single most valuable word in this file is **NOT EXECUTED** — for every step
+that touches a physical board. Synthesis itself is no longer in that category: it
+runs, and its cell counts are recorded.
 
 ---
 
@@ -49,21 +55,23 @@ Every row below was checked by running the command shown.
 |---|---|---|
 | RTL source | `ls rtl/` | **Exists** — 11 SystemVerilog files, lint-clean under Verilator. |
 | Verilator | `ls ~/.local/verilator/bin/verilator` | **Installed**, 5.49. (`command -v verilator` returns nothing only because `~/.local/bin` is not on `PATH`; the earlier "not installed" row used that check and was wrong.) |
-| Icarus Verilog | `command -v iverilog` | **Not installed** |
-| Yosys | `command -v yosys` | **Not installed** |
-| GTKWave | `command -v gtkwave` | **Not installed** |
+| Icarus Verilog | `ls ~/.local/oss-cad-suite/bin/iverilog` | **Installed** (OSS CAD Suite, 2026-11-08 release). |
+| Yosys | `ls ~/.local/oss-cad-suite/bin/yosys` | **Installed**, 0.70+360. Synthesis runs; see §3. |
+| sv2v | `ls ~/.local/sv2v/bin/sv2v` | **Installed**, v0.0.13. Required: Yosys rejects `return` in functions and a part-select on a function call. |
+| GTKWave | `ls ~/.local/oss-cad-suite/bin/gtkwave` | **Installed** (OSS CAD Suite). |
 | Board constraint file | `find . -name '*.xdc' -o -name '*.pcf' -o -name '*.sdc'` | **None.** No board target exists. |
 | Privileged install | `sudo -n true` | `sudo: interactive authentication is required` |
 | FPGA board | — | **None attached** |
 | Vendor toolchain (Vivado / Quartus / Gowin) | — | **Not installed** |
 
-Consequence: **RTL exists and is verified in simulation, but no synthesis step
-can run here.** Verilator elaborates and simulates; it does not map to gates,
-place, route or produce a bitstream. Yosys is absent and no board constraint
-file exists, so synthesis is not merely unrun — it is not yet possible on this
-machine. Per `tests/contract.md` P4.1, neither unverified RTL nor
-verified-in-simulation RTL may be presented as working hardware. This repository
-presents none.
+Consequence: **RTL exists, is verified in simulation, and now synthesizes to
+gates — but no board bring-up is possible here.** Verilator elaborates and
+simulates; Yosys maps to gates; neither places, routes or produces a bitstream
+without a target. No board constraint file exists, so there is nothing to
+synthesize *against* and no pinout to honour. Per `tests/contract.md` P4.1,
+neither unverified RTL nor verified-in-simulation RTL may be presented as working
+hardware. This repository presents none, and the cell counts in §3 are labelled as
+gate counts rather than as evidence of a working chip.
 
 ---
 
@@ -85,7 +93,9 @@ exists (the RTL is written and simulation-verified); the rest still do not.
      produce partial application and must be rejected in review.
    - `core.sv` — top level tying the above together over a flat memory port.
 2. **An RTL testbench** that can drive those modules without a board.
-3. **A simulator or synthesis tool** (§1) — none is present.
+3. **A simulator or synthesis tool** (§1) — **both present now.** Verilator for
+   simulation and the OSS CAD Suite for synthesis. The remaining gap is a board
+   constraint file (`.xdc`/`.pcf`/`.lpf`/`.sdc`) and a physical board.
 
 ---
 
@@ -149,18 +159,35 @@ that the two can be compared rather than merely both existing:
 **A testbench that only checks "it produces some output" proves nothing.** The
 comparison target is the software model in `src/`, which is itself only a model.
 
-### 3.4 Synthesis (requires a vendor toolchain)
+### 3.4 Synthesis — **EXECUTED** (open toolchain, no vendor tools needed)
 
 ```sh
-# NOT RUN IN THIS REPOSITORY. Requires Vivado/Quartus, which are not installed.
-vivado -mode batch -source synth.tcl     # or quartus_sh --flow compile ...
+# RUN. Reproducible now:
+zig build synth
+# or: tools/rtl-synth.sh all
 ```
 
-Whatever the tool reports — LUTs, FFs, DSPs, BRAMs, maximum frequency — is a
-**tool estimate for a part that was never programmed**, not a property of this
-repository. If such figures are ever recorded, they must be recorded with the
-exact tool version, part number, and command that produced them, and they still
-do not constitute a performance claim. See §5.
+Recorded result (`sv2v` v0.0.13, Yosys 0.70+360, OSS CAD Suite 2026-11-08):
+
+| Flow | Cells |
+|---|---|
+| Yosys generic `synth` | 42,775 |
+| `synth_ice40 -flatten` | 22,069 — 15,076 `SB_LUT4`, 4,924 `SB_CARRY`, 2,063 flip-flops (0 problems) |
+
+The iCE40 figure exceeds an HX8K (7,680 LUT4s), so this design does not fit the
+smallest plausible target. Anyone wanting board bring-up needs a larger part.
+
+Two source-level blockers had to be removed first, and neither was toolchain
+absence: Yosys rejects `return` inside a function (the package uses it
+throughout — `sv2v` lowers it) and rejects a part-select applied directly to a
+function call (`rtl/stream_engine.sv`, rewritten as `BYTE_LANES'(...)`).
+
+**What these numbers are not.** A cell count is a count of gates. There is no
+placement, no routing, no timing analysis, no part, and no bitstream. Nothing here
+is a maximum frequency, a critical path, or a utilisation report for a fitted
+design. Vendor-tool synthesis (Vivado/Quartus) has still never been run, and any
+figure it produces would likewise be a **tool estimate for a part that was never
+programmed**. See §5.
 
 ### 3.5 On-hardware bring-up (requires a board)
 
@@ -211,11 +238,11 @@ repository:
 
 | Prohibited claim | Why |
 |---|---|
-| A clock frequency ("runs at N MHz") | No synthesis has run; no tool was involved; no part exists. |
+| A clock frequency ("runs at N MHz") | Synthesis maps to gates and stops there. No placement, no routing, no timing analysis, and no part exists. |
 | Timing closure of any kind | Never attempted. |
 | A silicon performance figure | There is no silicon. |
-| A resource-utilisation figure (LUT/FF/BRAM counts) | No synthesis has run. |
-| "The RTL works" | No RTL exists. |
+| A resource-utilisation figure (LUT/FF/BRAM counts) **for a real part** | Cell counts exist (see §3 and `docs/STATUS.md`), but they are pre-placement gate counts, not a utilisation report for a fitted design. BRAM usage is not estimated at all. |
+| "The RTL works" | It lints clean, passes 553 testbench assertions, and synthesizes. It has never been placed, routed, timed or run on hardware. |
 | "Verified on an FPGA" | No board, no toolchain. |
 | Any speedup or throughput number | Those are simulator instruction counts; see `docs/fidelity.md` §3.4. |
 
@@ -228,9 +255,12 @@ The one honest sentence about Celeris-64 hardware is:
 
 ## 6. Current status, in one line
 
-**Phase 4 is PARTIALLY STARTED: RTL exists and is verified in simulation; the
-FPGA step is NOT STARTED.** The `rtl/` directory exists and lints clean under
-Verilator 5.49, with three testbenches passing. No synthesis tool is installed
-(Yosys is absent), no board constraint file exists, no board is attached, and
-**nothing in this document has been executed.** Synthesis, timing closure and
-hardware realization remain at zero.
+**Phase 4 is PARTIALLY DONE: RTL exists, is verified in simulation, and now
+synthesizes to gates; board bring-up is NOT STARTED.** The `rtl/` directory lints
+clean under Verilator 5.49 with three testbenches passing (553 assertions), and
+`zig build synth` maps the whole design to 42,775 generic cells / 22,069 iCE40
+cells. No board constraint file exists, no board is attached, and **no step in
+this document that touches hardware has been executed.** Timing closure, placement,
+routing, bitstream generation and hardware realization all remain at zero, and the
+design does not fit the smallest plausible target (an HX8K holds 7,680 LUT4s; this
+needs 15,076).

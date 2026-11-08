@@ -149,22 +149,45 @@ that was not observed.
   `~/.local/verilator/bin/verilator`, built from source without sudo, as this
   clause originally required. `command -v verilator` still returns nothing
   because `~/.local/bin` is not on `PATH`; check the explicit path. iverilog,
-  yosys and gtkwave remain absent, and `sudo` is unavailable in this session
-  (approval prompts are rejected). This clause previously read "no Verilator is
-  installed", which was true when written and became false when the tool was
-  built.
+  yosys, nextpnr and gtkwave are **also installed now**, via the OSS CAD Suite at
+  `~/.local/oss-cad-suite`, and `sv2v` at `~/.local/sv2v`. `sudo` remains
+  unavailable in this session (approval prompts are rejected), which is why every
+  tool lives under `~/.local`. This clause has now been wrong twice in the same
+  way: it read "no Verilator is installed" until Verilator was built, and "iverilog,
+  yosys and gtkwave remain absent" until they were installed. Both times the
+  sentence was true when written and became false when a tool arrived.
 - **Satisfied:** Verilator lints the RTL with exit 0
   (`--lint-only -Wall --top-module core`, whole tree, 0 warnings) and runs three
   testbenches with real assertions: `alu_tb` 80/80, `stream_tb` 314/314,
-  `core_tb` 159/159.
-- Simulation is **not** synthesis. The RTL is verified only in elaboration and
-  testbenches; it has never been mapped to gates, timing-closed, or placed on
-  silicon, and no clock frequency is claimed. Verified-in-simulation RTL must
+  `core_tb` 159/159 — 553 in total.
+- Simulation is **not** synthesis, but synthesis now also runs: `zig build synth`
+  maps the design to 42,775 generic cells / 22,069 iCE40 cells (see P4.2). It is
+  still not timing-closed, not placed or routed, and never on silicon, and no clock
+  frequency is claimed. Verified-in-simulation RTL must
   not be presented as working hardware any more than unverified RTL may.
 
 ### P4.2 — FPGA prototyping
-- Cannot be satisfied in this repository. No FPGA, no vendor toolchain.
-- Deliverable is a documented synthesis and test procedure, marked **not executed**.
+- **Board bring-up cannot be satisfied in this repository.** No FPGA, no vendor
+  toolchain, no board, and no constraint file (`.xdc`/`.pcf`/`.lpf`/`.sdc`) exists.
+  No document may claim otherwise.
+- **Synthesis is now satisfied and reproducible:** `zig build synth` (or
+  `tools/rtl-synth.sh`) lowers the SystemVerilog with `sv2v` and synthesizes with
+  Yosys. Recorded result: 42,775 cells in Yosys's generic flow, and 22,069 cells
+  mapped to iCE40 primitives (15,076 LUT4, 4,924 carry, 2,063 flip-flops), flattened,
+  0 problems. The iCE40 figure exceeds an HX8K (7,680 LUT4s), so the design does not
+  fit the smallest plausible target.
+- **Explicitly NOT satisfied, and not to be inferred from a cell count:** timing
+  closure, placement, routing, a clock frequency, a critical path, or any
+  area-per-technology figure. A cell count is a count of gates, not a result about
+  speed.
+- Deliverables in place: `tools/rtl-synth.sh` (exits non-zero when `sv2v` or Yosys is
+  missing rather than skipping quietly), the `synth` build step, and the procedure in
+  `docs/fpga-prototyping.md`.
+
+**Was:** "Cannot be satisfied in this repository. No FPGA, no vendor toolchain.
+Deliverable is a documented synthesis and test procedure, marked not executed."
+That wording predated a working synthesis flow and became false the moment one
+existed — the same staleness class as F16 and F18.
 
 ## 6. Verification Protocol
 
