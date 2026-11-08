@@ -1,0 +1,232 @@
+load_2_3|OK|0x5023000000000000|80|2|3|0
+store_3_2|OK|0x5132000000000000|81|3|2|0
+load_3_2|REJECT|error: at /tmp/v22gen/in.asm, line 1: while assembling this line the instruction "cap.load" operand 2 (destination register) is "R3", which is not valid here. Expected an even register index, because a capability descriptor occupies two consecutive registers and an odd index would overlap its neighbour (docs/isa-encoding.md §3.5).  
+store_2_3|REJECT|error: at /tmp/v22gen/in.asm, line 1: while assembling this line the instruction "cap.store" operand 2 (source register) is "R3", which is not valid here. Expected an even register index, because a capability descriptor occupies two consecutive registers and an odd index would overlap its neighbour (docs/isa-encoding.md §3.5).  
+load_2_3_4|REJECT|error: at /tmp/v22gen/in.asm, line 1: while assembling this line the instruction "cap.load" operand 3 (third register) is "R4", which is not valid here. Expected no third operand, because the encoding carries only two registers: the capability's address comes from the register pair itself, not from a third register (docs/isa-encoding.md §3.5).  
+store_2_4_6|REJECT|error: at /tmp/v22gen/in.asm, line 1: while assembling this line the instruction "cap.store" operand 3 (third register) is "R6", which is not valid here. Expected no third operand, because the encoding carries only two registers: the capability's address comes from the register pair itself, not from a third register (docs/isa-encoding.md §3.5).  
+check_2_3|OK|0x5223000000000000|82|2|3|0
+check_0_1|OK|0x5201000000000000|82|0|1|0
+check_0_7|OK|0x5207000000000000|82|0|7|0
+spawn_noslots|OK|0x9000000000000000|144|0|0|0
+spawn_T0|OK|0x9001000000000001|144|0|1|1
+spawn_T3|OK|0x9001000000000008|144|0|1|8
+spawn_T7|OK|0x9001000000000080|144|0|1|128
+spawn_T0T3T7|OK|0x9001000000000089|144|0|1|137
+join_T2|OK|0x9100000000000004|145|0|0|4
+yield|OK|0x9200000000000000|146|0|0|0
+sweep_load_0_0|OK|0x5000000000000000|80|0|0|0
+sweep_load_0_1|OK|0x5001000000000000|80|0|1|0
+sweep_load_0_2|OK|0x5002000000000000|80|0|2|0
+sweep_load_0_3|OK|0x5003000000000000|80|0|3|0
+sweep_load_0_4|OK|0x5004000000000000|80|0|4|0
+sweep_load_0_5|OK|0x5005000000000000|80|0|5|0
+sweep_load_0_6|OK|0x5006000000000000|80|0|6|0
+sweep_load_0_7|OK|0x5007000000000000|80|0|7|0
+sweep_load_0_8|OK|0x5008000000000000|80|0|8|0
+sweep_load_0_9|OK|0x5009000000000000|80|0|9|0
+sweep_load_0_10|OK|0x500a000000000000|80|0|10|0
+sweep_load_0_11|OK|0x500b000000000000|80|0|11|0
+sweep_load_2_0|OK|0x5020000000000000|80|2|0|0
+sweep_load_2_1|OK|0x5021000000000000|80|2|1|0
+sweep_load_2_2|OK|0x5022000000000000|80|2|2|0
+sweep_load_2_3|OK|0x5023000000000000|80|2|3|0
+sweep_load_2_4|OK|0x5024000000000000|80|2|4|0
+sweep_load_2_5|OK|0x5025000000000000|80|2|5|0
+sweep_load_2_6|OK|0x5026000000000000|80|2|6|0
+sweep_load_2_7|OK|0x5027000000000000|80|2|7|0
+sweep_load_2_8|OK|0x5028000000000000|80|2|8|0
+sweep_load_2_9|OK|0x5029000000000000|80|2|9|0
+sweep_load_2_10|OK|0x502a000000000000|80|2|10|0
+sweep_load_2_11|OK|0x502b000000000000|80|2|11|0
+sweep_load_4_0|OK|0x5040000000000000|80|4|0|0
+sweep_load_4_1|OK|0x5041000000000000|80|4|1|0
+sweep_load_4_2|OK|0x5042000000000000|80|4|2|0
+sweep_load_4_3|OK|0x5043000000000000|80|4|3|0
+sweep_load_4_4|OK|0x5044000000000000|80|4|4|0
+sweep_load_4_5|OK|0x5045000000000000|80|4|5|0
+sweep_load_4_6|OK|0x5046000000000000|80|4|6|0
+sweep_load_4_7|OK|0x5047000000000000|80|4|7|0
+sweep_load_4_8|OK|0x5048000000000000|80|4|8|0
+sweep_load_4_9|OK|0x5049000000000000|80|4|9|0
+sweep_load_4_10|OK|0x504a000000000000|80|4|10|0
+sweep_load_4_11|OK|0x504b000000000000|80|4|11|0
+sweep_load_6_0|OK|0x5060000000000000|80|6|0|0
+sweep_load_6_1|OK|0x5061000000000000|80|6|1|0
+sweep_load_6_2|OK|0x5062000000000000|80|6|2|0
+sweep_load_6_3|OK|0x5063000000000000|80|6|3|0
+sweep_load_6_4|OK|0x5064000000000000|80|6|4|0
+sweep_load_6_5|OK|0x5065000000000000|80|6|5|0
+sweep_load_6_6|OK|0x5066000000000000|80|6|6|0
+sweep_load_6_7|OK|0x5067000000000000|80|6|7|0
+sweep_load_6_8|OK|0x5068000000000000|80|6|8|0
+sweep_load_6_9|OK|0x5069000000000000|80|6|9|0
+sweep_load_6_10|OK|0x506a000000000000|80|6|10|0
+sweep_load_6_11|OK|0x506b000000000000|80|6|11|0
+sweep_load_8_0|OK|0x5080000000000000|80|8|0|0
+sweep_load_8_1|OK|0x5081000000000000|80|8|1|0
+sweep_load_8_2|OK|0x5082000000000000|80|8|2|0
+sweep_load_8_3|OK|0x5083000000000000|80|8|3|0
+sweep_load_8_4|OK|0x5084000000000000|80|8|4|0
+sweep_load_8_5|OK|0x5085000000000000|80|8|5|0
+sweep_load_8_6|OK|0x5086000000000000|80|8|6|0
+sweep_load_8_7|OK|0x5087000000000000|80|8|7|0
+sweep_load_8_8|OK|0x5088000000000000|80|8|8|0
+sweep_load_8_9|OK|0x5089000000000000|80|8|9|0
+sweep_load_8_10|OK|0x508a000000000000|80|8|10|0
+sweep_load_8_11|OK|0x508b000000000000|80|8|11|0
+sweep_load_10_0|OK|0x50a0000000000000|80|10|0|0
+sweep_load_10_1|OK|0x50a1000000000000|80|10|1|0
+sweep_load_10_2|OK|0x50a2000000000000|80|10|2|0
+sweep_load_10_3|OK|0x50a3000000000000|80|10|3|0
+sweep_load_10_4|OK|0x50a4000000000000|80|10|4|0
+sweep_load_10_5|OK|0x50a5000000000000|80|10|5|0
+sweep_load_10_6|OK|0x50a6000000000000|80|10|6|0
+sweep_load_10_7|OK|0x50a7000000000000|80|10|7|0
+sweep_load_10_8|OK|0x50a8000000000000|80|10|8|0
+sweep_load_10_9|OK|0x50a9000000000000|80|10|9|0
+sweep_load_10_10|OK|0x50aa000000000000|80|10|10|0
+sweep_load_10_11|OK|0x50ab000000000000|80|10|11|0
+sweep_store_0_0|OK|0x5100000000000000|81|0|0|0
+sweep_store_1_0|OK|0x5110000000000000|81|1|0|0
+sweep_store_2_0|OK|0x5120000000000000|81|2|0|0
+sweep_store_3_0|OK|0x5130000000000000|81|3|0|0
+sweep_store_4_0|OK|0x5140000000000000|81|4|0|0
+sweep_store_5_0|OK|0x5150000000000000|81|5|0|0
+sweep_store_6_0|OK|0x5160000000000000|81|6|0|0
+sweep_store_7_0|OK|0x5170000000000000|81|7|0|0
+sweep_store_8_0|OK|0x5180000000000000|81|8|0|0
+sweep_store_9_0|OK|0x5190000000000000|81|9|0|0
+sweep_store_10_0|OK|0x51a0000000000000|81|10|0|0
+sweep_store_11_0|OK|0x51b0000000000000|81|11|0|0
+sweep_store_0_2|OK|0x5102000000000000|81|0|2|0
+sweep_store_1_2|OK|0x5112000000000000|81|1|2|0
+sweep_store_2_2|OK|0x5122000000000000|81|2|2|0
+sweep_store_3_2|OK|0x5132000000000000|81|3|2|0
+sweep_store_4_2|OK|0x5142000000000000|81|4|2|0
+sweep_store_5_2|OK|0x5152000000000000|81|5|2|0
+sweep_store_6_2|OK|0x5162000000000000|81|6|2|0
+sweep_store_7_2|OK|0x5172000000000000|81|7|2|0
+sweep_store_8_2|OK|0x5182000000000000|81|8|2|0
+sweep_store_9_2|OK|0x5192000000000000|81|9|2|0
+sweep_store_10_2|OK|0x51a2000000000000|81|10|2|0
+sweep_store_11_2|OK|0x51b2000000000000|81|11|2|0
+sweep_store_0_4|OK|0x5104000000000000|81|0|4|0
+sweep_store_1_4|OK|0x5114000000000000|81|1|4|0
+sweep_store_2_4|OK|0x5124000000000000|81|2|4|0
+sweep_store_3_4|OK|0x5134000000000000|81|3|4|0
+sweep_store_4_4|OK|0x5144000000000000|81|4|4|0
+sweep_store_5_4|OK|0x5154000000000000|81|5|4|0
+sweep_store_6_4|OK|0x5164000000000000|81|6|4|0
+sweep_store_7_4|OK|0x5174000000000000|81|7|4|0
+sweep_store_8_4|OK|0x5184000000000000|81|8|4|0
+sweep_store_9_4|OK|0x5194000000000000|81|9|4|0
+sweep_store_10_4|OK|0x51a4000000000000|81|10|4|0
+sweep_store_11_4|OK|0x51b4000000000000|81|11|4|0
+sweep_store_0_6|OK|0x5106000000000000|81|0|6|0
+sweep_store_1_6|OK|0x5116000000000000|81|1|6|0
+sweep_store_2_6|OK|0x5126000000000000|81|2|6|0
+sweep_store_3_6|OK|0x5136000000000000|81|3|6|0
+sweep_store_4_6|OK|0x5146000000000000|81|4|6|0
+sweep_store_5_6|OK|0x5156000000000000|81|5|6|0
+sweep_store_6_6|OK|0x5166000000000000|81|6|6|0
+sweep_store_7_6|OK|0x5176000000000000|81|7|6|0
+sweep_store_8_6|OK|0x5186000000000000|81|8|6|0
+sweep_store_9_6|OK|0x5196000000000000|81|9|6|0
+sweep_store_10_6|OK|0x51a6000000000000|81|10|6|0
+sweep_store_11_6|OK|0x51b6000000000000|81|11|6|0
+sweep_store_0_8|OK|0x5108000000000000|81|0|8|0
+sweep_store_1_8|OK|0x5118000000000000|81|1|8|0
+sweep_store_2_8|OK|0x5128000000000000|81|2|8|0
+sweep_store_3_8|OK|0x5138000000000000|81|3|8|0
+sweep_store_4_8|OK|0x5148000000000000|81|4|8|0
+sweep_store_5_8|OK|0x5158000000000000|81|5|8|0
+sweep_store_6_8|OK|0x5168000000000000|81|6|8|0
+sweep_store_7_8|OK|0x5178000000000000|81|7|8|0
+sweep_store_8_8|OK|0x5188000000000000|81|8|8|0
+sweep_store_9_8|OK|0x5198000000000000|81|9|8|0
+sweep_store_10_8|OK|0x51a8000000000000|81|10|8|0
+sweep_store_11_8|OK|0x51b8000000000000|81|11|8|0
+sweep_store_0_10|OK|0x510a000000000000|81|0|10|0
+sweep_store_1_10|OK|0x511a000000000000|81|1|10|0
+sweep_store_2_10|OK|0x512a000000000000|81|2|10|0
+sweep_store_3_10|OK|0x513a000000000000|81|3|10|0
+sweep_store_4_10|OK|0x514a000000000000|81|4|10|0
+sweep_store_5_10|OK|0x515a000000000000|81|5|10|0
+sweep_store_6_10|OK|0x516a000000000000|81|6|10|0
+sweep_store_7_10|OK|0x517a000000000000|81|7|10|0
+sweep_store_8_10|OK|0x518a000000000000|81|8|10|0
+sweep_store_9_10|OK|0x519a000000000000|81|9|10|0
+sweep_store_10_10|OK|0x51aa000000000000|81|10|10|0
+sweep_store_11_10|OK|0x51ba000000000000|81|11|10|0
+neg_load_1_0|REJECT|error: at /tmp/v22gen/in.asm, line 1: while assembling this line the instruction "cap.load" operand 2 (destination register) is "R1", which is not valid here. Expected an even register index, because a capability descriptor occupies two consecutive registers and an odd index would overlap its neighbour (docs/isa-encoding.md §3.5).  
+neg_load_1_2|REJECT|error: at /tmp/v22gen/in.asm, line 1: while assembling this line the instruction "cap.load" operand 2 (destination register) is "R1", which is not valid here. Expected an even register index, because a capability descriptor occupies two consecutive registers and an odd index would overlap its neighbour (docs/isa-encoding.md §3.5).  
+neg_load_1_4|REJECT|error: at /tmp/v22gen/in.asm, line 1: while assembling this line the instruction "cap.load" operand 2 (destination register) is "R1", which is not valid here. Expected an even register index, because a capability descriptor occupies two consecutive registers and an odd index would overlap its neighbour (docs/isa-encoding.md §3.5).  
+neg_load_1_6|REJECT|error: at /tmp/v22gen/in.asm, line 1: while assembling this line the instruction "cap.load" operand 2 (destination register) is "R1", which is not valid here. Expected an even register index, because a capability descriptor occupies two consecutive registers and an odd index would overlap its neighbour (docs/isa-encoding.md §3.5).  
+neg_load_1_8|REJECT|error: at /tmp/v22gen/in.asm, line 1: while assembling this line the instruction "cap.load" operand 2 (destination register) is "R1", which is not valid here. Expected an even register index, because a capability descriptor occupies two consecutive registers and an odd index would overlap its neighbour (docs/isa-encoding.md §3.5).  
+neg_load_1_10|REJECT|error: at /tmp/v22gen/in.asm, line 1: while assembling this line the instruction "cap.load" operand 2 (destination register) is "R1", which is not valid here. Expected an even register index, because a capability descriptor occupies two consecutive registers and an odd index would overlap its neighbour (docs/isa-encoding.md §3.5).  
+neg_load_3_0|REJECT|error: at /tmp/v22gen/in.asm, line 1: while assembling this line the instruction "cap.load" operand 2 (destination register) is "R3", which is not valid here. Expected an even register index, because a capability descriptor occupies two consecutive registers and an odd index would overlap its neighbour (docs/isa-encoding.md §3.5).  
+neg_load_3_2|REJECT|error: at /tmp/v22gen/in.asm, line 1: while assembling this line the instruction "cap.load" operand 2 (destination register) is "R3", which is not valid here. Expected an even register index, because a capability descriptor occupies two consecutive registers and an odd index would overlap its neighbour (docs/isa-encoding.md §3.5).  
+neg_load_3_4|REJECT|error: at /tmp/v22gen/in.asm, line 1: while assembling this line the instruction "cap.load" operand 2 (destination register) is "R3", which is not valid here. Expected an even register index, because a capability descriptor occupies two consecutive registers and an odd index would overlap its neighbour (docs/isa-encoding.md §3.5).  
+neg_load_3_6|REJECT|error: at /tmp/v22gen/in.asm, line 1: while assembling this line the instruction "cap.load" operand 2 (destination register) is "R3", which is not valid here. Expected an even register index, because a capability descriptor occupies two consecutive registers and an odd index would overlap its neighbour (docs/isa-encoding.md §3.5).  
+neg_load_3_8|REJECT|error: at /tmp/v22gen/in.asm, line 1: while assembling this line the instruction "cap.load" operand 2 (destination register) is "R3", which is not valid here. Expected an even register index, because a capability descriptor occupies two consecutive registers and an odd index would overlap its neighbour (docs/isa-encoding.md §3.5).  
+neg_load_3_10|REJECT|error: at /tmp/v22gen/in.asm, line 1: while assembling this line the instruction "cap.load" operand 2 (destination register) is "R3", which is not valid here. Expected an even register index, because a capability descriptor occupies two consecutive registers and an odd index would overlap its neighbour (docs/isa-encoding.md §3.5).  
+neg_load_5_0|REJECT|error: at /tmp/v22gen/in.asm, line 1: while assembling this line the instruction "cap.load" operand 2 (destination register) is "R5", which is not valid here. Expected an even register index, because a capability descriptor occupies two consecutive registers and an odd index would overlap its neighbour (docs/isa-encoding.md §3.5).  
+neg_load_5_2|REJECT|error: at /tmp/v22gen/in.asm, line 1: while assembling this line the instruction "cap.load" operand 2 (destination register) is "R5", which is not valid here. Expected an even register index, because a capability descriptor occupies two consecutive registers and an odd index would overlap its neighbour (docs/isa-encoding.md §3.5).  
+neg_load_5_4|REJECT|error: at /tmp/v22gen/in.asm, line 1: while assembling this line the instruction "cap.load" operand 2 (destination register) is "R5", which is not valid here. Expected an even register index, because a capability descriptor occupies two consecutive registers and an odd index would overlap its neighbour (docs/isa-encoding.md §3.5).  
+neg_load_5_6|REJECT|error: at /tmp/v22gen/in.asm, line 1: while assembling this line the instruction "cap.load" operand 2 (destination register) is "R5", which is not valid here. Expected an even register index, because a capability descriptor occupies two consecutive registers and an odd index would overlap its neighbour (docs/isa-encoding.md §3.5).  
+neg_load_5_8|REJECT|error: at /tmp/v22gen/in.asm, line 1: while assembling this line the instruction "cap.load" operand 2 (destination register) is "R5", which is not valid here. Expected an even register index, because a capability descriptor occupies two consecutive registers and an odd index would overlap its neighbour (docs/isa-encoding.md §3.5).  
+neg_load_5_10|REJECT|error: at /tmp/v22gen/in.asm, line 1: while assembling this line the instruction "cap.load" operand 2 (destination register) is "R5", which is not valid here. Expected an even register index, because a capability descriptor occupies two consecutive registers and an odd index would overlap its neighbour (docs/isa-encoding.md §3.5).  
+neg_load_7_0|REJECT|error: at /tmp/v22gen/in.asm, line 1: while assembling this line the instruction "cap.load" operand 2 (destination register) is "R7", which is not valid here. Expected an even register index, because a capability descriptor occupies two consecutive registers and an odd index would overlap its neighbour (docs/isa-encoding.md §3.5).  
+neg_load_7_2|REJECT|error: at /tmp/v22gen/in.asm, line 1: while assembling this line the instruction "cap.load" operand 2 (destination register) is "R7", which is not valid here. Expected an even register index, because a capability descriptor occupies two consecutive registers and an odd index would overlap its neighbour (docs/isa-encoding.md §3.5).  
+neg_load_7_4|REJECT|error: at /tmp/v22gen/in.asm, line 1: while assembling this line the instruction "cap.load" operand 2 (destination register) is "R7", which is not valid here. Expected an even register index, because a capability descriptor occupies two consecutive registers and an odd index would overlap its neighbour (docs/isa-encoding.md §3.5).  
+neg_load_7_6|REJECT|error: at /tmp/v22gen/in.asm, line 1: while assembling this line the instruction "cap.load" operand 2 (destination register) is "R7", which is not valid here. Expected an even register index, because a capability descriptor occupies two consecutive registers and an odd index would overlap its neighbour (docs/isa-encoding.md §3.5).  
+neg_load_7_8|REJECT|error: at /tmp/v22gen/in.asm, line 1: while assembling this line the instruction "cap.load" operand 2 (destination register) is "R7", which is not valid here. Expected an even register index, because a capability descriptor occupies two consecutive registers and an odd index would overlap its neighbour (docs/isa-encoding.md §3.5).  
+neg_load_7_10|REJECT|error: at /tmp/v22gen/in.asm, line 1: while assembling this line the instruction "cap.load" operand 2 (destination register) is "R7", which is not valid here. Expected an even register index, because a capability descriptor occupies two consecutive registers and an odd index would overlap its neighbour (docs/isa-encoding.md §3.5).  
+neg_load_9_0|REJECT|error: at /tmp/v22gen/in.asm, line 1: while assembling this line the instruction "cap.load" operand 2 (destination register) is "R9", which is not valid here. Expected an even register index, because a capability descriptor occupies two consecutive registers and an odd index would overlap its neighbour (docs/isa-encoding.md §3.5).  
+neg_load_9_2|REJECT|error: at /tmp/v22gen/in.asm, line 1: while assembling this line the instruction "cap.load" operand 2 (destination register) is "R9", which is not valid here. Expected an even register index, because a capability descriptor occupies two consecutive registers and an odd index would overlap its neighbour (docs/isa-encoding.md §3.5).  
+neg_load_9_4|REJECT|error: at /tmp/v22gen/in.asm, line 1: while assembling this line the instruction "cap.load" operand 2 (destination register) is "R9", which is not valid here. Expected an even register index, because a capability descriptor occupies two consecutive registers and an odd index would overlap its neighbour (docs/isa-encoding.md §3.5).  
+neg_load_9_6|REJECT|error: at /tmp/v22gen/in.asm, line 1: while assembling this line the instruction "cap.load" operand 2 (destination register) is "R9", which is not valid here. Expected an even register index, because a capability descriptor occupies two consecutive registers and an odd index would overlap its neighbour (docs/isa-encoding.md §3.5).  
+neg_load_9_8|REJECT|error: at /tmp/v22gen/in.asm, line 1: while assembling this line the instruction "cap.load" operand 2 (destination register) is "R9", which is not valid here. Expected an even register index, because a capability descriptor occupies two consecutive registers and an odd index would overlap its neighbour (docs/isa-encoding.md §3.5).  
+neg_load_9_10|REJECT|error: at /tmp/v22gen/in.asm, line 1: while assembling this line the instruction "cap.load" operand 2 (destination register) is "R9", which is not valid here. Expected an even register index, because a capability descriptor occupies two consecutive registers and an odd index would overlap its neighbour (docs/isa-encoding.md §3.5).  
+neg_load_11_0|REJECT|error: at /tmp/v22gen/in.asm, line 1: while assembling this line the instruction "cap.load" operand 2 (destination register) is "R11", which is not valid here. Expected an even register index, because a capability descriptor occupies two consecutive registers and an odd index would overlap its neighbour (docs/isa-encoding.md §3.5).  
+neg_load_11_2|REJECT|error: at /tmp/v22gen/in.asm, line 1: while assembling this line the instruction "cap.load" operand 2 (destination register) is "R11", which is not valid here. Expected an even register index, because a capability descriptor occupies two consecutive registers and an odd index would overlap its neighbour (docs/isa-encoding.md §3.5).  
+neg_load_11_4|REJECT|error: at /tmp/v22gen/in.asm, line 1: while assembling this line the instruction "cap.load" operand 2 (destination register) is "R11", which is not valid here. Expected an even register index, because a capability descriptor occupies two consecutive registers and an odd index would overlap its neighbour (docs/isa-encoding.md §3.5).  
+neg_load_11_6|REJECT|error: at /tmp/v22gen/in.asm, line 1: while assembling this line the instruction "cap.load" operand 2 (destination register) is "R11", which is not valid here. Expected an even register index, because a capability descriptor occupies two consecutive registers and an odd index would overlap its neighbour (docs/isa-encoding.md §3.5).  
+neg_load_11_8|REJECT|error: at /tmp/v22gen/in.asm, line 1: while assembling this line the instruction "cap.load" operand 2 (destination register) is "R11", which is not valid here. Expected an even register index, because a capability descriptor occupies two consecutive registers and an odd index would overlap its neighbour (docs/isa-encoding.md §3.5).  
+neg_load_11_10|REJECT|error: at /tmp/v22gen/in.asm, line 1: while assembling this line the instruction "cap.load" operand 2 (destination register) is "R11", which is not valid here. Expected an even register index, because a capability descriptor occupies two consecutive registers and an odd index would overlap its neighbour (docs/isa-encoding.md §3.5).  
+neg_store_0_1|REJECT|error: at /tmp/v22gen/in.asm, line 1: while assembling this line the instruction "cap.store" operand 2 (source register) is "R1", which is not valid here. Expected an even register index, because a capability descriptor occupies two consecutive registers and an odd index would overlap its neighbour (docs/isa-encoding.md §3.5).  
+neg_store_2_1|REJECT|error: at /tmp/v22gen/in.asm, line 1: while assembling this line the instruction "cap.store" operand 2 (source register) is "R1", which is not valid here. Expected an even register index, because a capability descriptor occupies two consecutive registers and an odd index would overlap its neighbour (docs/isa-encoding.md §3.5).  
+neg_store_4_1|REJECT|error: at /tmp/v22gen/in.asm, line 1: while assembling this line the instruction "cap.store" operand 2 (source register) is "R1", which is not valid here. Expected an even register index, because a capability descriptor occupies two consecutive registers and an odd index would overlap its neighbour (docs/isa-encoding.md §3.5).  
+neg_store_6_1|REJECT|error: at /tmp/v22gen/in.asm, line 1: while assembling this line the instruction "cap.store" operand 2 (source register) is "R1", which is not valid here. Expected an even register index, because a capability descriptor occupies two consecutive registers and an odd index would overlap its neighbour (docs/isa-encoding.md §3.5).  
+neg_store_8_1|REJECT|error: at /tmp/v22gen/in.asm, line 1: while assembling this line the instruction "cap.store" operand 2 (source register) is "R1", which is not valid here. Expected an even register index, because a capability descriptor occupies two consecutive registers and an odd index would overlap its neighbour (docs/isa-encoding.md §3.5).  
+neg_store_10_1|REJECT|error: at /tmp/v22gen/in.asm, line 1: while assembling this line the instruction "cap.store" operand 2 (source register) is "R1", which is not valid here. Expected an even register index, because a capability descriptor occupies two consecutive registers and an odd index would overlap its neighbour (docs/isa-encoding.md §3.5).  
+neg_store_0_3|REJECT|error: at /tmp/v22gen/in.asm, line 1: while assembling this line the instruction "cap.store" operand 2 (source register) is "R3", which is not valid here. Expected an even register index, because a capability descriptor occupies two consecutive registers and an odd index would overlap its neighbour (docs/isa-encoding.md §3.5).  
+neg_store_2_3|REJECT|error: at /tmp/v22gen/in.asm, line 1: while assembling this line the instruction "cap.store" operand 2 (source register) is "R3", which is not valid here. Expected an even register index, because a capability descriptor occupies two consecutive registers and an odd index would overlap its neighbour (docs/isa-encoding.md §3.5).  
+neg_store_4_3|REJECT|error: at /tmp/v22gen/in.asm, line 1: while assembling this line the instruction "cap.store" operand 2 (source register) is "R3", which is not valid here. Expected an even register index, because a capability descriptor occupies two consecutive registers and an odd index would overlap its neighbour (docs/isa-encoding.md §3.5).  
+neg_store_6_3|REJECT|error: at /tmp/v22gen/in.asm, line 1: while assembling this line the instruction "cap.store" operand 2 (source register) is "R3", which is not valid here. Expected an even register index, because a capability descriptor occupies two consecutive registers and an odd index would overlap its neighbour (docs/isa-encoding.md §3.5).  
+neg_store_8_3|REJECT|error: at /tmp/v22gen/in.asm, line 1: while assembling this line the instruction "cap.store" operand 2 (source register) is "R3", which is not valid here. Expected an even register index, because a capability descriptor occupies two consecutive registers and an odd index would overlap its neighbour (docs/isa-encoding.md §3.5).  
+neg_store_10_3|REJECT|error: at /tmp/v22gen/in.asm, line 1: while assembling this line the instruction "cap.store" operand 2 (source register) is "R3", which is not valid here. Expected an even register index, because a capability descriptor occupies two consecutive registers and an odd index would overlap its neighbour (docs/isa-encoding.md §3.5).  
+neg_store_0_5|REJECT|error: at /tmp/v22gen/in.asm, line 1: while assembling this line the instruction "cap.store" operand 2 (source register) is "R5", which is not valid here. Expected an even register index, because a capability descriptor occupies two consecutive registers and an odd index would overlap its neighbour (docs/isa-encoding.md §3.5).  
+neg_store_2_5|REJECT|error: at /tmp/v22gen/in.asm, line 1: while assembling this line the instruction "cap.store" operand 2 (source register) is "R5", which is not valid here. Expected an even register index, because a capability descriptor occupies two consecutive registers and an odd index would overlap its neighbour (docs/isa-encoding.md §3.5).  
+neg_store_4_5|REJECT|error: at /tmp/v22gen/in.asm, line 1: while assembling this line the instruction "cap.store" operand 2 (source register) is "R5", which is not valid here. Expected an even register index, because a capability descriptor occupies two consecutive registers and an odd index would overlap its neighbour (docs/isa-encoding.md §3.5).  
+neg_store_6_5|REJECT|error: at /tmp/v22gen/in.asm, line 1: while assembling this line the instruction "cap.store" operand 2 (source register) is "R5", which is not valid here. Expected an even register index, because a capability descriptor occupies two consecutive registers and an odd index would overlap its neighbour (docs/isa-encoding.md §3.5).  
+neg_store_8_5|REJECT|error: at /tmp/v22gen/in.asm, line 1: while assembling this line the instruction "cap.store" operand 2 (source register) is "R5", which is not valid here. Expected an even register index, because a capability descriptor occupies two consecutive registers and an odd index would overlap its neighbour (docs/isa-encoding.md §3.5).  
+neg_store_10_5|REJECT|error: at /tmp/v22gen/in.asm, line 1: while assembling this line the instruction "cap.store" operand 2 (source register) is "R5", which is not valid here. Expected an even register index, because a capability descriptor occupies two consecutive registers and an odd index would overlap its neighbour (docs/isa-encoding.md §3.5).  
+neg_store_0_7|REJECT|error: at /tmp/v22gen/in.asm, line 1: while assembling this line the instruction "cap.store" operand 2 (source register) is "R7", which is not valid here. Expected an even register index, because a capability descriptor occupies two consecutive registers and an odd index would overlap its neighbour (docs/isa-encoding.md §3.5).  
+neg_store_2_7|REJECT|error: at /tmp/v22gen/in.asm, line 1: while assembling this line the instruction "cap.store" operand 2 (source register) is "R7", which is not valid here. Expected an even register index, because a capability descriptor occupies two consecutive registers and an odd index would overlap its neighbour (docs/isa-encoding.md §3.5).  
+neg_store_4_7|REJECT|error: at /tmp/v22gen/in.asm, line 1: while assembling this line the instruction "cap.store" operand 2 (source register) is "R7", which is not valid here. Expected an even register index, because a capability descriptor occupies two consecutive registers and an odd index would overlap its neighbour (docs/isa-encoding.md §3.5).  
+neg_store_6_7|REJECT|error: at /tmp/v22gen/in.asm, line 1: while assembling this line the instruction "cap.store" operand 2 (source register) is "R7", which is not valid here. Expected an even register index, because a capability descriptor occupies two consecutive registers and an odd index would overlap its neighbour (docs/isa-encoding.md §3.5).  
+neg_store_8_7|REJECT|error: at /tmp/v22gen/in.asm, line 1: while assembling this line the instruction "cap.store" operand 2 (source register) is "R7", which is not valid here. Expected an even register index, because a capability descriptor occupies two consecutive registers and an odd index would overlap its neighbour (docs/isa-encoding.md §3.5).  
+neg_store_10_7|REJECT|error: at /tmp/v22gen/in.asm, line 1: while assembling this line the instruction "cap.store" operand 2 (source register) is "R7", which is not valid here. Expected an even register index, because a capability descriptor occupies two consecutive registers and an odd index would overlap its neighbour (docs/isa-encoding.md §3.5).  
+neg_store_0_9|REJECT|error: at /tmp/v22gen/in.asm, line 1: while assembling this line the instruction "cap.store" operand 2 (source register) is "R9", which is not valid here. Expected an even register index, because a capability descriptor occupies two consecutive registers and an odd index would overlap its neighbour (docs/isa-encoding.md §3.5).  
+neg_store_2_9|REJECT|error: at /tmp/v22gen/in.asm, line 1: while assembling this line the instruction "cap.store" operand 2 (source register) is "R9", which is not valid here. Expected an even register index, because a capability descriptor occupies two consecutive registers and an odd index would overlap its neighbour (docs/isa-encoding.md §3.5).  
+neg_store_4_9|REJECT|error: at /tmp/v22gen/in.asm, line 1: while assembling this line the instruction "cap.store" operand 2 (source register) is "R9", which is not valid here. Expected an even register index, because a capability descriptor occupies two consecutive registers and an odd index would overlap its neighbour (docs/isa-encoding.md §3.5).  
+neg_store_6_9|REJECT|error: at /tmp/v22gen/in.asm, line 1: while assembling this line the instruction "cap.store" operand 2 (source register) is "R9", which is not valid here. Expected an even register index, because a capability descriptor occupies two consecutive registers and an odd index would overlap its neighbour (docs/isa-encoding.md §3.5).  
+neg_store_8_9|REJECT|error: at /tmp/v22gen/in.asm, line 1: while assembling this line the instruction "cap.store" operand 2 (source register) is "R9", which is not valid here. Expected an even register index, because a capability descriptor occupies two consecutive registers and an odd index would overlap its neighbour (docs/isa-encoding.md §3.5).  
+neg_store_10_9|REJECT|error: at /tmp/v22gen/in.asm, line 1: while assembling this line the instruction "cap.store" operand 2 (source register) is "R9", which is not valid here. Expected an even register index, because a capability descriptor occupies two consecutive registers and an odd index would overlap its neighbour (docs/isa-encoding.md §3.5).  
+neg_store_0_11|REJECT|error: at /tmp/v22gen/in.asm, line 1: while assembling this line the instruction "cap.store" operand 2 (source register) is "R11", which is not valid here. Expected an even register index, because a capability descriptor occupies two consecutive registers and an odd index would overlap its neighbour (docs/isa-encoding.md §3.5).  
+neg_store_2_11|REJECT|error: at /tmp/v22gen/in.asm, line 1: while assembling this line the instruction "cap.store" operand 2 (source register) is "R11", which is not valid here. Expected an even register index, because a capability descriptor occupies two consecutive registers and an odd index would overlap its neighbour (docs/isa-encoding.md §3.5).  
+neg_store_4_11|REJECT|error: at /tmp/v22gen/in.asm, line 1: while assembling this line the instruction "cap.store" operand 2 (source register) is "R11", which is not valid here. Expected an even register index, because a capability descriptor occupies two consecutive registers and an odd index would overlap its neighbour (docs/isa-encoding.md §3.5).  
+neg_store_6_11|REJECT|error: at /tmp/v22gen/in.asm, line 1: while assembling this line the instruction "cap.store" operand 2 (source register) is "R11", which is not valid here. Expected an even register index, because a capability descriptor occupies two consecutive registers and an odd index would overlap its neighbour (docs/isa-encoding.md §3.5).  
+neg_store_8_11|REJECT|error: at /tmp/v22gen/in.asm, line 1: while assembling this line the instruction "cap.store" operand 2 (source register) is "R11", which is not valid here. Expected an even register index, because a capability descriptor occupies two consecutive registers and an odd index would overlap its neighbour (docs/isa-encoding.md §3.5).  
+neg_store_10_11|REJECT|error: at /tmp/v22gen/in.asm, line 1: while assembling this line the instruction "cap.store" operand 2 (source register) is "R11", which is not valid here. Expected an even register index, because a capability descriptor occupies two consecutive registers and an odd index would overlap its neighbour (docs/isa-encoding.md §3.5).  
