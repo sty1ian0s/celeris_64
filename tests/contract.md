@@ -145,12 +145,22 @@ that was not observed.
 
 ### P4.1 — RTL specification
 - SystemVerilog under `rtl/` mapping the register file, ALU, stream engine.
-- **Toolchain reality:** no Verilator, iverilog or yosys is installed, and `sudo` is
-  unavailable in this session (approval prompts are rejected). Verilator must be built
-  from source into `~/.local` if it is to be verified.
-- If Verilator is available: it must lint the RTL with exit 0.
-- If Verilator is NOT available: the RTL is **unverified** and the task must say so.
-  Unverified RTL must not be presented as working hardware.
+- **Toolchain reality (updated):** Verilator 5.49 **is** installed at
+  `~/.local/verilator/bin/verilator`, built from source without sudo, as this
+  clause originally required. `command -v verilator` still returns nothing
+  because `~/.local/bin` is not on `PATH`; check the explicit path. iverilog,
+  yosys and gtkwave remain absent, and `sudo` is unavailable in this session
+  (approval prompts are rejected). This clause previously read "no Verilator is
+  installed", which was true when written and became false when the tool was
+  built.
+- **Satisfied:** Verilator lints the RTL with exit 0
+  (`--lint-only -Wall --top-module core`, whole tree, 0 warnings) and runs three
+  testbenches with real assertions: `alu_tb` 80/80, `stream_tb` 314/314,
+  `core_tb` 159/159.
+- Simulation is **not** synthesis. The RTL is verified only in elaboration and
+  testbenches; it has never been mapped to gates, timing-closed, or placed on
+  silicon, and no clock frequency is claimed. Verified-in-simulation RTL must
+  not be presented as working hardware any more than unverified RTL may.
 
 ### P4.2 — FPGA prototyping
 - Cannot be satisfied in this repository. No FPGA, no vendor toolchain.
