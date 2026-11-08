@@ -725,3 +725,33 @@ worth keeping alongside the reserved-field sweep method.
 
 The through-line: **a green signal is only as good as the claim it is attached to.** Fourteen
 defects this session were found by executing something, and none by reading a summary.
+
+### F16: stale absence claims survived the phase that falsified them
+
+Found while answering "how far along are we?" by measuring the roadmap against the code, rather
+than by recalling it. Phase 4 landed — `rtl/` exists, lints clean, three testbenches pass — but
+four documents still asserted the opposite:
+
+- `docs/fidelity.md` §4: "`rtl/` SystemVerilog — **Does not exist.** No directory, no file."
+- `docs/fidelity.md` §2 table: RTL row "**Not started**", evidence `ls rtl/` -> "No such directory".
+- `docs/fpga-prototyping.md`: "There is **no `rtl/` directory**", and the prerequisite table row
+  "RTL source — `ls rtl/` — **No such directory.**"
+- `docs/fpga-prototyping.md` §6: "**Phase 4 is NOT STARTED.** No `rtl/` directory exists."
+
+The `Verilator not installed` rows are a distinct and more interesting failure. They were
+recorded as `command -v verilator` -> nothing, which **is** what that command returns — because
+Verilator was installed to `~/.local/verilator/bin`, which is not on `PATH`. The check was
+truthful about the command and wrong about the world. A negative result from a check that cannot
+succeed is not evidence of absence; it is evidence of a bad check. Both rows are now recorded as
+installed, with the misleading-check mechanism written down so the next person does not
+"correct" it back.
+
+This is the same class as the RTL header version strings corrected earlier the same session:
+a statement was true when written, a later change falsified it, and nothing re-read the
+statement. Documentation that names a phase as "not started" needs to be revisited by the
+phase that starts it. Nothing enforces that today.
+
+Also corrected: `docs/fidelity.md`'s legend had no category for lint-clean-but-unsynthesized
+RTL, so the new table row used a label the legend did not define. Added
+**Simulation-verified spec**, defined as weaker than a software model for correctness claims
+because no physical implementation exists to measure.

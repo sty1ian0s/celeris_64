@@ -63,6 +63,10 @@ Legend for **What it is**:
 - **Software model** — implements as much of a declared contract as software
   can, with limits that are named in the file and cited below.
 - **Spec artifact** — a document or description, not running code.
+- **Simulation-verified spec** — RTL that elaborates and passes testbenches
+  under a simulator. Explicitly *not* synthesized, *not* timing-closed, and not
+  hardware. Weaker than a software model for correctness claims, because no
+  physical implementation exists to measure.
 - **Not started** — does not exist.
 
 | Subsystem | What it is | Evidence (command actually run) | Observed result |
@@ -88,8 +92,8 @@ Legend for **What it is**:
 | Networking (`src/stdlib_net.zig`) | Software model — **performs no network I/O at all** | `~/.local/zig/zig test src/stdlib_net.zig` | All 13 tests passed |
 | Benchmarks (`benchmarks/bench.zig`) | Advisory simulator counts only | `~/.local/zig/zig build bench` | 4 tests passed; prints 8 lines, each containing "simulated" |
 | Independent verifier suite (`tests/vm_tests.zig`) | Executable model | `~/.local/zig/zig build test` | 37 tests passed |
-| RTL / SystemVerilog (`rtl/`) | **Not started** | `ls rtl/` | **No such directory.** See §4. |
-| FPGA procedure | **Spec artifact, NOT EXECUTED** | see `docs/fpga-prototyping.md` | **Never run.** No toolchain. See §4. |
+| RTL / SystemVerilog (`rtl/`) | **Simulation-verified spec** — lints clean, three testbenches pass; NOT synthesized | `verilator --lint-only -Wall --top-module core` | 0 warnings. See §4. |
+| FPGA procedure | **Spec artifact, NOT EXECUTED** | see `docs/fpga-prototyping.md` | **Never run.** No synthesis toolchain and no board. See §4. |
 
 ---
 
@@ -174,25 +178,33 @@ grep -inE "speedup|faster|%|cycle|throughput|ghz" /tmp/bench.txt # -> no matches
 
 ---
 
-## 4. RTL and FPGA: deliberately not started
+## 4. RTL and FPGA: RTL exists and is lint-verified; synthesis has not started
 
 | Item | Status |
 |------|--------|
-| `rtl/` SystemVerilog | **Does not exist.** No directory, no file. |
-| Verilator | **Not installed** (`command -v verilator` -> nothing) |
+| `rtl/` SystemVerilog | **Exists** — 11 files, second implementation of §2-§5. Lint-clean under `verilator --lint-only -Wall --top-module core`. |
+| Verilator | **Installed** at `~/.local/verilator/bin/verilator` (5.49, no sudo). Note `command -v verilator` returns nothing because `~/.local/bin` is not on `PATH` — the recorded check was misleading, not the tool. |
 | Icarus Verilog | **Not installed** |
-| Yosys | **Not installed** |
+| Yosys | **Not installed** — so no synthesis claim of any kind is possible here. |
 | GTKWave | **Not installed** |
+| Constraint file for any board | **Does not exist.** No `.xdc`, `.pcf`, `.lpf` or `.sdc` anywhere. |
 | `sudo` | Unavailable. `sudo -n true` -> "interactive authentication is required". |
-| Any synthesis | **Never run.** |
+| Any synthesis | **Never run.** Verilator elaborates and simulates; it does not map to gates. |
 | Any timing closure | **Never attempted.** |
 | Any FPGA or silicon | **Never happened.** |
 
-Verilator can in principle be built from source into `~/.local`, but on this
-machine no RTL simulator or synthesis tool exists, so **any RTL written here
-would be unverified**. Per the task contract, unverified RTL must not be
-presented as hardware. The honest state is therefore: **not started**, and
-`docs/fpga-prototyping.md` records a procedure that has **not been executed**.
+Earlier revisions of this section stated that `rtl/` did not exist and that
+Verilator was not installed. Both statements became false when Phase 4 landed
+and have been corrected here; the corrections are recorded as findings rather
+than silently overwritten.
+
+The RTL is **verified only in simulation**: it lints clean, and three
+testbenches pass with real assertions (`alu_tb` 80/80, `stream_tb` 314/314,
+`core_tb` 159/159). Simulation is not synthesis. Per the task contract,
+unverified RTL must not be presented as hardware, and neither must verified-in-
+simulation RTL. The honest state is: **RTL written and simulation-verified;
+hardware realization not started.** `docs/fpga-prototyping.md` records a
+procedure that has **not been executed**.
 
 **No clock frequency, timing figure, area figure or silicon performance claim
 appears anywhere in this repository.** If one is ever added, it is a bug.

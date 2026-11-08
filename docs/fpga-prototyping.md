@@ -5,10 +5,18 @@ Status: **NOT EXECUTED — PROCEDURE ONLY.**
 
 > ## ⚠ THIS PROCEDURE HAS NEVER BEEN RUN
 >
-> Nothing in this document has been executed in this repository. There is **no
-> `rtl/` directory**, no FPGA board, no vendor toolchain, and no open-source RTL
-> simulator or synthesis tool installed on this machine. Verilator, Icarus
-> Verilog, Yosys and GTKWave are all absent, and `sudo` is unavailable.
+> Nothing in this document has been executed in this repository. There is no
+> FPGA board, no vendor toolchain, and no synthesis flow installed on this
+> machine: Icarus Verilog, Yosys and GTKWave are all absent, and `sudo` is
+> unavailable. There is no constraint file for any board (`.xdc`, `.pcf`, `.lpf`
+> or `.sdc`), so no board target exists to synthesize against.
+>
+> Verilator **is** installed (5.49, without sudo) and `rtl/` **does** exist —
+> both statements to the contrary in earlier revisions of this file were stale
+> and have been corrected. The RTL lints clean and three testbenches pass under
+> simulation. **None of that is synthesis.** Verilator elaborates and simulates;
+> it does not map to gates, does not place and route, and does not produce a
+> bitstream. Every step below still remains unexecuted.
 >
 > What follows is what a person *would* do, written down precisely, so that the
 > work is specified rather than implied. **Do not read any step below as
@@ -24,9 +32,10 @@ subsystem, see `docs/fidelity.md`.
 ## 0. Why this document exists at all
 
 The architecture specification describes hardware. This repository contains a
-*software model* of that hardware and nothing else. Writing an FPGA procedure
-that has not been executed is only honest if it says so on its face, which is
-why this section is first rather than last.
+*software model* of that hardware, plus an RTL implementation of the encoding
+that is verified **in simulation only** — elaboration and testbenches, never
+gates. Writing an FPGA procedure that has not been executed is only honest if it
+says so on its face, which is why this section is first rather than last.
 
 The single most valuable word in this file is **NOT EXECUTED**.
 
@@ -34,29 +43,34 @@ The single most valuable word in this file is **NOT EXECUTED**.
 
 ## 1. Prerequisites — current state on this machine
 
-Every row below was checked by running the command shown. All of them are
-**absent or unavailable**.
+Every row below was checked by running the command shown.
 
 | Prerequisite | Command used to check | Observed result |
 |---|---|---|
-| RTL source | `ls rtl/` | **No such directory.** No RTL exists to synthesise. |
-| Verilator | `command -v verilator` | **Not installed** |
+| RTL source | `ls rtl/` | **Exists** — 11 SystemVerilog files, lint-clean under Verilator. |
+| Verilator | `ls ~/.local/verilator/bin/verilator` | **Installed**, 5.49. (`command -v verilator` returns nothing only because `~/.local/bin` is not on `PATH`; the earlier "not installed" row used that check and was wrong.) |
 | Icarus Verilog | `command -v iverilog` | **Not installed** |
 | Yosys | `command -v yosys` | **Not installed** |
 | GTKWave | `command -v gtkwave` | **Not installed** |
+| Board constraint file | `find . -name '*.xdc' -o -name '*.pcf' -o -name '*.sdc'` | **None.** No board target exists. |
 | Privileged install | `sudo -n true` | `sudo: interactive authentication is required` |
 | FPGA board | — | **None attached** |
 | Vendor toolchain (Vivado / Quartus / Gowin) | — | **Not installed** |
 
-Consequence: **any RTL produced in this repository would be unverified.** Per
-`tests/contract.md` P4.1, unverified RTL must not be presented as working
-hardware. This repository therefore presents none.
+Consequence: **RTL exists and is verified in simulation, but no synthesis step
+can run here.** Verilator elaborates and simulates; it does not map to gates,
+place, route or produce a bitstream. Yosys is absent and no board constraint
+file exists, so synthesis is not merely unrun — it is not yet possible on this
+machine. Per `tests/contract.md` P4.1, neither unverified RTL nor
+verified-in-simulation RTL may be presented as working hardware. This repository
+presents none.
 
 ---
 
 ## 2. What would have to exist first
 
-Before any step in §3 can mean anything, the following must exist. None does.
+Before any step in §3 can mean anything, the following must exist. Item 1 now
+exists (the RTL is written and simulation-verified); the rest still do not.
 
 1. **`rtl/` SystemVerilog** for the modules the roadmap names:
    - `registers.sv` — `R0`–`R11`, `ZERO`, `PC`, `SP`, `LR`, `FLAGS`, with
@@ -214,6 +228,9 @@ The one honest sentence about Celeris-64 hardware is:
 
 ## 6. Current status, in one line
 
-**Phase 4 is NOT STARTED.** No `rtl/` directory exists, no RTL simulator or
-synthesis tool is installed, no board is attached, and nothing in this document
-has been executed.
+**Phase 4 is PARTIALLY STARTED: RTL exists and is verified in simulation; the
+FPGA step is NOT STARTED.** The `rtl/` directory exists and lints clean under
+Verilator 5.49, with three testbenches passing. No synthesis tool is installed
+(Yosys is absent), no board constraint file exists, no board is attached, and
+**nothing in this document has been executed.** Synthesis, timing closure and
+hardware realization remain at zero.
