@@ -165,6 +165,20 @@ pub fn build(b: *std.Build) void {
     live_cmd.step.dependOn(b.getInstallStep());
     b.step("live-check", "Re-derive the verifier's recorded facts from the current binary").dependOn(&live_cmd.step);
 
+    // RTL synthesis (tools/rtl-synth.sh): lowers the SystemVerilog to Verilog-2005
+    // with sv2v, then synthesizes with Yosys and prints cell counts. Verilator
+    // lints but never synthesizes, so this is the only step that turns the RTL into
+    // gates. It reports NO timing and establishes NO clock frequency -- the script
+    // repeats that on every run.
+    //
+    // Separate from `test` because it needs sv2v and Yosys installed under ~/.local,
+    // which not every checkout has. It exits non-zero when either tool is missing
+    // rather than skipping quietly: a synthesis step that silently no-ops would let
+    // "the RTL has never been synthesized" stay true while `zig build synth` looked
+    // green.
+    const synth_cmd = b.addSystemCommand(&.{ "bash", "tools/rtl-synth.sh", "all" });
+    b.step("synth", "Synthesize the RTL and report cell counts (no timing)").dependOn(&synth_cmd.step);
+
     const test_step = b.step("test", "Run the Celeris-64 test suite");
     test_step.dependOn(&b.addRunArtifact(vm_tests).step);
     test_step.dependOn(&b.addRunArtifact(suite_tests).step);

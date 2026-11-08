@@ -27,7 +27,9 @@
 //   chunk never becomes active at all.
 //
 // FIDELITY (docs/isa-encoding.md §8): lint-verified specification + simulation.
-// NEVER synthesized, never timing-closed, never on silicon. No frequency claimed.
+// Synthesized (tools/rtl-synth.sh, Yosys + sv2v): see docs/STATUS.md. Still NOT
+// timing-closed, NOT placed/routed, never on silicon. No frequency is claimed:
+// a cell count is not a timing result.
 //=============================================================================
 
 module stream_engine
@@ -165,7 +167,13 @@ module stream_engine
     elem_width_q  = width_e'(elem_width_raw_i[1:0]);
     width_legal_q = width_enc_is_legal(elem_width_raw_i);        // §5: 0..3 legal
     width_bits_q  = width_bits(elem_width_q);
-    lane_msk_q    = width_mask(elem_width_q)[BYTE_LANES-1:0];  // §5 byte lanes
+    // §5 byte lanes. `width_mask` returns XLEN bits; the low BYTE_LANES are the
+    // byte enables. The narrowing cast is written explicitly rather than as
+    // `width_mask(elem_width_q)[BYTE_LANES-1:0]`, because a part-select applied
+    // directly to a function call is accepted by Verilator but rejected by
+    // Yosys's Verilog frontend — and that single construct blocked synthesis of
+    // the entire design.
+    lane_msk_q = BYTE_LANES'(width_mask(elem_width_q));
 
     // chunk * elementSize. The element size in bytes is width_bits >> 3 (§5 sizes
     // are 64/32/16/8 bits, so the divide is exact). Multiplied at SPAN_W so a 20-bit
