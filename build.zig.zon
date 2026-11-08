@@ -1,5 +1,7 @@
 .{
     .name = .celeris_64,
+    // 0.x: the ISA contract is at v1.14 and changes often, and the accelerator
+    // and capability spaces are deliberately unimplemented. Pre-1.0 says that.
     .version = "0.1.0",
     .minimum_zig_version = "0.17.1",
     .fingerprint = 0xf56e7f91a072c784,
@@ -9,5 +11,8 @@
         "src",
         "tests",
         "docs",
+        "rtl",
+        "tools",
+        "benchmarks",
     },
 }
