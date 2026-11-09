@@ -2630,9 +2630,48 @@ from the flag-only `TEST` (0x85) and missed the `0x83` immediate group, which is
 this file keeps recording: **a table of what a decoder supports must be produced by feeding
 it instructions, not by reading its dispatch.**
 
-The AArch64 subset is `B.cond`/`B`, `ADD`/`SUB` (immediate and shifted-register), `CMP`,
-`MADD`/`MSUB`, `LDR`/`STR`, `MOVZ`/`MOVN`, `RET`, `NOP` — the dispatch at
-`src/isa_aarch64.zig:103-131` lists exactly those, and nothing bitwise appears.
+> **AMENDMENT (2026-11-09): the two rows of the table above are STALE, and both were
+> corrected by re-running the same probe — not by reading.** F45 has since added the AArch64
+> logical group, so "NONE" is no longer true, and the x86 row omits `or`.
+>
+> Re-measured, one instruction at a time, through the decoders this repository executes:
+>
+> ```
+> A64  and x0,x0,x1        (0x8A010000): OK
+> A64  orr x0,x0,x1        (0xAA010000): OK
+> A64  eor x0,x0,x1        (0xCA010000): OK
+> A64  orr x7,x7,x6,lsl #5 (0xAA0614E7): OK      <- SHIFTED-REGISTER form
+> A64  and x6,..,x8,lsr #3 (0x8A480CC6): OK      <- SHIFTED-REGISTER form
+> A64  lsr x6,x5,#13 (UBFM)(0xD34DFCA6): REJECTED UnknownOpcode
+> A64  lsl x8,x8,x9 (lslv) (0x9AC92108): REJECTED UnknownOpcode
+> x86  shrq $13,%r10       (49 C1 EA 0D): REJECTED UnknownOpcode
+> x86  shlq $5,%r10        (49 C1 E2 05): REJECTED UnknownOpcode
+> x86  andq $31,%r10       (49 83 E2 1F): OK
+> x86  orq %r10,%r9        (4D 09 D1):    REJECTED UnknownOpcode
+> x86  xorq %r9,%r9        (4D 31 C9):    OK
+> ```
+>
+> So the corrected rows are:
+>
+> | ISA | Bitwise operations available |
+> |---|---|
+> | **AArch64 A64** | `and`/`orr`/`eor` **and their shifted-register forms** (`..., lsl #k` / `lsr #k`). **NOT** standalone `lsl`/`lsr` by immediate (UBFM) and **NOT** register-form `lslv` |
+> | **x86-64** | `xor r/m,r` (0x31) and `and r/m, imm8` (0x83 /4). **No `or`** (0x09), no register-form `and` (0x21), **no shifts at all** (0xD1/0xD3) |
+>
+> **This has a consequence for the example suite that is worth stating plainly.** A `field.*`
+> kernel that unpacks a field from a HIGH bit offset needs a shift on the other three ISAs —
+> and **x86-64 cannot express one**, so such a kernel **cannot be written four-way in this
+> subset**. That is a limit of the x86-64 subset, not of x86-64, and not of CLS64. The
+> correct response is to record it rather than to weaken the kernel until it fits, and a
+> `field.*` example is consequently **not** delivered: the shape is expressible on CLS64,
+> RISC-V and AArch64, but not on all four, and the suite's contract is that all four compute
+> the same thing.
+
+The AArch64 subset was `B.cond`/`B`, `ADD`/`SUB` (immediate and shifted-register), `CMP`,
+`MADD`/`MSUB`, `LDR`/`STR`, `MOVZ`/`MOVN`, `RET`, `NOP` when this entry was written, and this
+sentence used to end "and nothing bitwise appears". **F45 has since added the logical group**,
+so read the amendment above for the current list; the sentence is corrected rather than
+deleted because it was true of the revision this entry measured.
 
 ### Why this is worth recording rather than working around
 
