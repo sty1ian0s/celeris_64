@@ -2321,6 +2321,54 @@ machine words from the produced object, never retype or paste them from a draft.
 
 ## F43: `UNSIGNED_LESS` and `UNSIGNED_GREATER` are unreachable from any CLS64 program
 
+> **CORRECTION to this entry, 2026-11-09 — the divergence is NOT between the simulator and
+> the core RTL, and the "five statuses" claim below is true only of the `select_unit`
+> primitive.**
+>
+> The entry below says `rtl/select_unit.sv` "produces **all five** values" and concludes
+> "the RTL can emit statuses the simulator cannot", calling this "a two-layer divergence".
+> **Measured, that is wrong at the level that matters.** `select_unit` is indeed a
+> five-status unit, but it selects between the views with a `signed_view_i` **port**, and
+> `rtl/core.sv:430` — the only place the core instantiates it — **hardwires that port to
+> `1'b1`**, with a comment naming `src/vm.zig` as the authority for the choice. So the
+> integrated core produces exactly the three statuses the simulator does. The two layers
+> **agree**; there is no live divergence to fix.
+>
+> The "RTL emits all five" evidence comes from `rtl/tb/stream_tb.sv`, which drives
+> `su_signed_view` directly as a *unit* test of the primitive (lines 625–671 exercise both
+> views). That is a legitimate unit test of the hardware, but it is **not** the core's
+> behaviour, and the entry below read it as though it were. **Running `rtl/tb/core_tb.sv`
+> confirms the core is green (159/159) while never checking `UNSIGNED_*` at all** — P10
+> asserts only `LESS == 1`. A green testbench that never exercises the disputed value is
+> not evidence either way; it is the F40 shape (a testbench green while asserting the wrong
+> thing).
+>
+> **What survives unchanged, and is still a real defect:** a CLS64 **program** can never
+> observe `3` or `4`. `vm.zig:293` calls `compareSigned` unconditionally, so every
+> `branch Rs, [UNSIGNED_LESS], ...` is silently dead code. `selection.compareUnsigned`
+> exists in `src/select.zig:40` and is called from nowhere. The status enum's two unsigned
+> members are reachable **only** through `select`'s `[UNSIGNED_*]` match values, and only
+> if some other instruction put `3` or `4` in the status register — which nothing can.
+>
+> **So the decision narrows to (b), and it is smaller than the entry claims.** Option (a)
+> ("give `compare` the unsigned view when it should have it") requires a signal, and
+> **there is no field to carry one**: §3.2.1 defines only the enum and states no bit
+> layout, so `compare` follows §3.1's ALU row, where `rs2`/`imm28` are the second source
+> and `[39:28]` is checked zero. The core RTL has already made this exact choice in
+> hardware. **The honest resolution is to state in §3.2.1 that the simulator's and the
+> core's `compare` produce the SIGNED ordering, and that `UNSIGNED_*` are reserved for a
+> future encoding that carries a view bit** — which makes `[UNSIGNED_*]` on a `branch` a
+> diagnosable dead branch rather than silence. **Recorded, not yet amended in §3.2.1: that
+> is a normative text change and belongs to whoever owns the contract revision, not to a
+> silent code patch.** `src/analyzer.zig`'s rejected-rule entry already declines to warn
+> about it for an independent and still-correct reason (the tested register may be written
+> on another path); that rejection stands.
+>
+> **What may still NOT be said:** that the CLS64 ISA lacks unsigned comparison. It defines
+> it, five members strong, and `select_unit` implements all five. The gap is that the
+> **program-visible path** cannot produce two of them, in the simulator and in the
+> integrated core alike.
+
 **Found** while writing a branch-heavy example kernel: a program that counted words in an
 unsigned band returned **0** instead of 61, because its `branch R9, [UNSIGNED_LESS], ...`
 could never fire. **Status: open, with a decision to make.**
