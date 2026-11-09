@@ -1570,3 +1570,76 @@ decoder fuzz round trip       -> checked=11839 identical=11839, 0 mismatches
 reserved-field audit          -> 9/9 enforcement points, all 9 rejected when set
 live-check                    -> all 232 recorded facts still reproduce
 ```
+
+---
+
+## F36: the §3.6 accelerator table names operands the encoding does not carry
+
+**Found** while scoping the last open core gap (wiring `0x60`–`0x8F` into the VM),
+by grepping the contract rather than by running anything. **Status: open — the gap
+is confirmed; the refusal behaviour it implies was being implemented at the time of
+writing and is not yet verified.**
+
+### The gap
+
+`docs/isa-encoding.md` §3.6 (Amendment 1.1) fixes the accelerator operand layout
+and assigns all 13 operations. The layout is:
+
+```
+rs2[47:44] | rs3[43:40] | reserved[39:32] | count[31:0]
+```
+
+Every operand a §3.6 operation can receive must be reachable from that word: two
+registers, one optional third register, and a 32-bit count. Four operations need
+something that is not there.
+
+- **`matrix.det` (`0x60`), `matrix.invert` (`0x61`), `matrix.mul` (`0x62`)** all call
+  a model function (`matrix.determinant`, `matrix.invert`, `matrix.multiply`) that
+  takes a matrix whose **dimension** must be known. The word carries no dimension,
+  and `takes_count` is false for all three, so `count` is not even available as a
+  candidate. The spec does not say where `n` comes from, and does not record that it
+  is missing.
+- **`matrix.transform` (`0x63`)** is the subtle one. Its row reads
+  *"`matrix.transformSoA(xs, ys, zs, m)`; the three streams are consecutive from
+  `rs1`, `count` is elements per stream"*. So `count` is defined — but the model
+  also takes a rigid-body matrix `m`, and the row never says where `m` comes from.
+  A defined operand next to an undefined one reads as if the row were complete.
+- **`codec.compress` (`0x80`) / `codec.decompress` (`0x81`)** take an input **and an
+  output** buffer. `decompress`'s own doc comment says *"`out` must be large enough"*,
+  but neither the word nor §3.6 names the output address or its size. `rd`, `rs1` and
+  `count` are all already spoken for.
+
+### Why this is a finding worth recording rather than a detail to paper over
+
+The obvious way to make all 13 execute is to pick a convention — say `n` comes from
+`rs2`, or `n` is always 4, or the output buffer starts right after the input. Every
+one of those produces a **plausible-looking numeric result** from an arbitrary guess.
+For a matrix determinant that is a wrong number the simulator would confidently
+report, and the repository's whole position on fabricated results (`docs/fidelity.md`,
+F32) is that an honest refusal beats a confident wrong answer.
+
+There is a second reason: `count` is documented as *"`0` means derive the count from
+the destination register"* (§3.6). That same convention is the natural place a
+dimension would live, but it is not stated for the matrix operations, and inventing
+it here would be fixing the contract in an implementation file — where the RTL, the
+disassembler and any future backend would not see it.
+
+### What may and may not be said
+
+- **May be said:** the §3.6 table is complete about *operand names* and incomplete
+  about *address and shape arithmetic*; four of the thirteen operations cannot be
+  executed from the information the encoding carries.
+- **May be said:** the accelerator range assembles, disassembles and round-trips
+  byte-identically — verified, including `matrix.det` and `codec.compress`. The gap
+  is execution semantics, not encoding.
+- **May not be said:** that the accelerators "work". They do not execute. It is also
+  not true that they are undecodable — `decoder.decode` returns a populated
+  `.accelerator` payload for every one of them.
+
+### What closing it needs
+
+A §3.6 amendment stating, per operation, where each matrix dimension and each output
+buffer comes from — the same kind of amendment 1.1 already made for the operand
+layout. That is a contract change on the scale of the one F32 needed, and like F32 it
+should be made in the contract rather than in whichever component hits the problem
+first.
