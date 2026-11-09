@@ -507,7 +507,7 @@ test "DELIBERATE CONTRACT UPDATE 1.1: assigned accelerators render as mnemonics"
     // no mnemonic existed and commented bytes were the honest alternative to
     // emitting text the assembler would reject.
     //
-    // Amendment 1.1 assigns the layout and 13 mnemonics, so the workaround is
+    // Amendment 1.1 (and 1.19) assigns the layout and 14 mnemonics, so the workaround is
     // obsolete. An ASSIGNED opcode now renders as a real, reassemblable mnemonic.
     // A RESERVED opcode still must not invent syntax, and is covered separately.
     var buf: [256]u8 = undefined;
@@ -528,7 +528,7 @@ test "a zero thread slot mask does not invent a slot name" {
 
 // -- §3.6 / §3.7 round-trip acceptance (contract v1.1) -------------------------
 
-test "all 13 §3.6 accelerators round-trip verbatim through dis then asm" {
+test "all 14 §3.6 accelerators round-trip verbatim through dis then asm" {
     var buf: [256]u8 = undefined;
     for (assembler_accel.accelerators) |a| {
         // Build a CANONICAL word: §3.6 defines an unused register field as 0, so

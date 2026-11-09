@@ -444,6 +444,9 @@ pub const Vm = struct {
             0x62 => self.refuseAccelerator(a, pc),
             0x63 => self.accelTransform(a, pc),
             0x64 => self.accelIdentity(a, pc),
+            // Amendment 1.19: the second multiply opcode, whose three matrices each
+            // carry their own header in memory. 0x62 above is untouched.
+            0x65 => self.accelMulOut(a, pc),
             0x70, 0x71 => self.accelFft(a, pc),
             0x72, 0x73 => self.accelNtt(a, pc),
             0x80 => self.accelCompress(a, pc),
@@ -503,10 +506,14 @@ pub const Vm = struct {
 
     /// Rule E: an operand a row does not use must be zero in the word.
     fn accelReservedZero(self: *Vm, value: u4, pc: u64, a: decoding.Accelerator, which: []const u8) Refused!void {
+        const sentence = "The {s} is not used by this operation, so it must be zero. Amendment 1.18 rejects a non-zero value rather than ignoring it, because the word would then carry a meaning the operation does not have.";
         if (value != 0) {
-            var buf: [192]u8 = undefined;
+            // 192 bytes was too small for the longest operand name ("third source
+            // register") and `catch {}` hid the overflow, so this sentence ended
+            // mid-word. Deriving the size from the literal keeps the two in step.
+            var buf: [sentence.len + 32]u8 = undefined;
             var w = std.Io.Writer.fixed(&buf);
-            w.print("The {s} is not used by this operation, so it must be zero. Amendment 1.18 rejects a non-zero value rather than ignoring it, because the word would then carry a meaning the operation does not have.", .{which}) catch {};
+            w.print(sentence, .{which}) catch return error.Refused;
             return self.refuseAccelNow(pc, a, "a zero value in an unused operand field", w.buffered());
         }
     }
@@ -700,6 +707,113 @@ pub const Vm = struct {
             return try self.refuseModel(pc, a, matrix_model.explain(e));
         self.accelCommit(pc, a);
         return .advanced;
+    }
+
+    /// The largest matrix dimension this opcode accepts, per side (rule E.7).
+    ///
+    /// Not a machine limit and not a performance figure: it is the size of the
+    /// `[256]f64` scratch array `matrix.multiply` needs for its accumulator
+    /// (AGENTS.md §4.1 forbids allocating in the loop), which holds any product up
+    /// to 16 x 16. A larger dimension refuses with a sentence; it never truncates.
+    pub const mulout_max_order: u32 = 16;
+
+    /// `matrix.mulout rd, rs1, rs2` (0x65) — amendment 1.19. Input A at `rs1`'s
+    /// address, input B at `rs2`'s, the product at `rd`'s; each is a header followed
+    /// by row-major f64 data (rules A, B). `rs3` and `count` must be zero (rule E).
+    ///
+    /// The ORDER comes from the data, so this word carries no dimension and invents
+    /// none. That is exactly what 0x62 could not do: three addresses are the only
+    /// values it needs, and four fields hold three addresses.
+    fn accelMulOut(self: *Vm, a: decoding.Accelerator, pc: u64) Refused!Step {
+        try self.accelReservedZero(a.rs3, pc, a, "third source register");
+        // Not accelReservedZero: that helper is for the four-bit register fields.
+        // `count` has no length to carry here — both orders arrive in the headers —
+        // so a value in it would be a number the operation silently ignored.
+        if (a.count != 0) {
+            var buf: [256]u8 = undefined;
+            var w = std.Io.Writer.fixed(&buf);
+            w.print("The count field must be zero on this operation, because both matrix shapes come from their in-memory headers; {d} was written. A count here would state a length the operation never reads.", .{a.count}) catch return error.Refused;
+            return self.refuseAccelNow(pc, a, "a zero count field, since the shapes come from the matrix headers", w.buffered());
+        }
+
+        const a_addr = self.regs.read(a.rs1);
+        const b_addr = self.regs.read(a.rs2);
+        const out_addr = self.regs.read(a.rd);
+
+        // Rule E.3 order of operations: every address is checked, and both headers
+        // are READ, before any data region is touched — so a bad second header can
+        // never leave a half-written product behind.
+        const a_shape = try self.accelShape(a, pc, a_addr, "the first input matrix");
+        const b_shape = try self.accelShape(a, pc, b_addr, "the second input matrix");
+        if (a_shape.cols != b_shape.rows) {
+            var buf: [320]u8 = undefined;
+            var w = std.Io.Writer.fixed(&buf);
+            w.print("The first matrix is {d} by {d} and the second is {d} by {d}, so its {d} columns do not match the second matrix's {d} rows. A product is defined only when those two numbers are equal, so nothing was computed.", .{ a_shape.rows, a_shape.cols, b_shape.rows, b_shape.cols, a_shape.cols, b_shape.rows }) catch return error.Refused;
+            return self.refuseAccelNow(pc, a, "a first matrix whose column count equals the second matrix's row count", w.buffered());
+        }
+
+        const a_data = try self.accelRange(a_addr + 8, a_shape.bytes(), 8, pc, a, "the first matrix's f64 data");
+        const b_data = try self.accelRange(b_addr + 8, b_shape.bytes(), 8, pc, a, "the second matrix's f64 data");
+
+        // The product's address is `rd`'s and its order follows from the two inputs,
+        // so its header claims nothing: header and data are one range of one length,
+        // written only after the model has fully succeeded (accelCommit).
+        const out_shape = Shape{ .rows = a_shape.rows, .cols = b_shape.cols };
+        const out_len = 8 + out_shape.bytes();
+        const out_bytes = try self.accelRange(out_addr, out_len, 8, pc, a, "the product matrix, header first");
+        const out = try accelF64(out_bytes[8..]);
+
+        const ma = matrix_model.Mat.init(a_shape.rows, a_shape.cols, try accelF64(a_data)) catch
+            return try self.refuseModel(pc, a, "a first matrix that fits its buffer");
+        const mb = matrix_model.Mat.init(b_shape.rows, b_shape.cols, try accelF64(b_data)) catch
+            return try self.refuseModel(pc, a, "a second matrix that fits its buffer");
+
+        const res = matrix_model.multiply(ma, mb, out) catch |e|
+            return try self.refuseModel(pc, a, matrix_model.explain(e));
+
+        std.mem.writeInt(u32, out_bytes[0..4], @intCast(res.rows), .little);
+        std.mem.writeInt(u32, out_bytes[4..8], @intCast(res.cols), .little);
+        // `rd` is NOT rewritten: unlike matrix.det, this row's whole result is in
+        // memory, so Rule E.2 has no scalar to reinterpret into the register and the
+        // address it named stays there (Rule E.7).
+        self.accelCommit(pc, a);
+        return .advanced;
+    }
+
+    /// One matrix as its own header describes it: `rows:u32 | cols:u32` at `addr`
+    /// (rule A's header form), data immediately after.
+    const Shape = struct {
+        rows: usize,
+        cols: usize,
+
+        fn bytes(s: Shape) u64 {
+            return 8 * @as(u64, s.rows) * @as(u64, s.cols);
+        }
+    };
+
+    /// Reads and validates a matrix header. Every step is a refusal with a sentence
+    /// naming the address, the length and the numbers involved; nothing is clamped
+    /// and nothing is assumed, because a guessed shape is a plausible wrong matrix.
+    fn accelShape(self: *Vm, a: decoding.Accelerator, pc: u64, addr: u64, what: []const u8) Refused!Shape {
+        const header = try self.accelRange(addr, 8, 4, pc, a, what);
+        const rows = std.mem.readInt(u32, header[0..4], .little);
+        const cols = std.mem.readInt(u32, header[4..8], .little);
+
+        if (rows > mulout_max_order or cols > mulout_max_order) {
+            var buf: [320]u8 = undefined;
+            var w = std.Io.Writer.fixed(&buf);
+            w.print("The header at address {d} says {d} rows and {d} columns, but this operation accepts at most {d} by {d}. The limit is the 256-f64 scratch buffer the multiply model needs, which it may not allocate per call.", .{ addr, rows, cols, mulout_max_order, mulout_max_order }) catch return error.Refused;
+            return self.refuseAccelNow(pc, a, "matrix sides of at most 16 rows and 16 columns", w.buffered());
+        }
+        if (rows == 0 or cols == 0) {
+            var buf: [288]u8 = undefined;
+            var w = std.Io.Writer.fixed(&buf);
+            w.print("The header at address {d} says {d} rows and {d} columns. A matrix with no rows or no columns has no entries, so a product through it is not defined; write both numbers as at least one.", .{ addr, rows, cols }) catch return error.Refused;
+            return self.refuseAccelNow(pc, a, "a header naming at least one row and one column", w.buffered());
+        }
+        // The data region's bounds and alignment are checked by the caller through
+        // the same `accelRange` every other operation uses — once per range, not twice.
+        return .{ .rows = rows, .cols = cols };
     }
 
     /// `fft.forward` (0x70) / `fft.inverse` (0x71). `count` is COMPLEX elements:
@@ -2763,6 +2877,265 @@ test "matrix.mul STILL REFUSES, because five inputs do not fit four fields" {
     try testing.expect(std.mem.indexOf(u8, text, "matrix.mul") != null);
     try testing.expect(std.mem.indexOf(u8, text, "E.5") != null);
     try testing.expect(!diagnostics.hasBareHexCode(text));
+}
+
+// -- amendment 1.19: matrix.mulout (0x65) -----------------------------------
+
+// The references below were computed in Python, independently of matrix.zig, from
+// the same hand-chosen values:
+//   A = [[1,2,3],[4,5,6]]   (2x3)      B = [[7,8],[9,10],[11,12]]   (3x2)
+//   A.B = [[58,64],[139,154]]          (2x2)
+// If the VM had transposed either operand, indexed by the wrong stride, or read the
+// headers as the wrong order, these four numbers would differ.
+
+/// Writes a `rows:u32 | cols:u32` header at `addr` and the data after it, row-major.
+fn putMatrix(img: []u8, addr: u64, rows: u32, cols: u32, data: []const f64) void {
+    std.mem.writeInt(u32, img[@intCast(addr)..][0..4], rows, .little);
+    std.mem.writeInt(u32, img[@intCast(addr + 4)..][0..4], cols, .little);
+    for (data, 0..) |v, i| putF64(img, addr + 8 + i * 8, v);
+}
+
+const mul_a = [6]f64{ 1, 2, 3, 4, 5, 6 };
+const mul_b = [6]f64{ 7, 8, 9, 10, 11, 12 };
+
+const mul_a_addr: u64 = accel_data_base;
+const mul_b_addr: u64 = accel_data_base + 0x100;
+const mul_out_addr: u64 = accel_data_base + 0x200;
+
+/// `rd` = out, `rs1` = A, `rs2` = B, `rs3` and `count` zero. Returns the halted
+/// machine and its image; the caller asserts on memory and registers.
+fn runMulOut(op: u8, rs3: u4, count: u32) !struct { img: []u8, vm: Vm } {
+    const img = try imageWithSize(&.{
+        movImm(1, mul_a_addr),
+        movImm(2, mul_b_addr),
+        movImm(3, mul_out_addr),
+        accelWord(op, 3, 1, 2, rs3, count),
+        encode(0x01, 0, 0, 0),
+    }, accel_image_size);
+    putMatrix(img, mul_a_addr, 2, 3, &mul_a);
+    putMatrix(img, mul_b_addr, 3, 2, &mul_b);
+    var vm = Vm.init(img);
+    _ = try vm.run(100);
+    return .{ .img = img, .vm = vm };
+}
+
+test "matrix.mulout (0x65) EXECUTES and writes the correct product, header first" {
+    // This is the product the shipped `matmul_8x8` path refuses to reach through
+    // 0x62 because that word cannot name a matrix's order. Here the orders are in
+    // memory, so nothing is guessed.
+    const run = try runMulOut(0x65, 0, 0);
+    defer testing.allocator.free(run.img);
+
+    // The header describes the product: 2 rows, 2 columns.
+    try testing.expectEqual(@as(u32, 2), std.mem.readInt(u32, run.img[mul_out_addr..][0..4], .little));
+    try testing.expectEqual(@as(u32, 2), std.mem.readInt(u32, run.img[mul_out_addr + 4 ..][0..4], .little));
+    // Row-major [[58,64],[139,154]] — the Python reference.
+    try testing.expectEqual(@as(f64, 58), getF64(run.img, mul_out_addr + 8));
+    try testing.expectEqual(@as(f64, 64), getF64(run.img, mul_out_addr + 16));
+    try testing.expectEqual(@as(f64, 139), getF64(run.img, mul_out_addr + 24));
+    try testing.expectEqual(@as(f64, 154), getF64(run.img, mul_out_addr + 32));
+    // `rd` holds the product's ADDRESS as a plain VALUE and is NOT rewritten: unlike
+    // `matrix.det`, this operation's result is entirely in memory, so there is no
+    // scalar to reinterpret into the register (rule E.7).
+    try testing.expectEqual(mul_out_addr, run.vm.regs.read(3));
+}
+
+test "matrix.mulout's ranking is REAL: rewriting a into the product of a different shape changes it" {
+    // Falsifies "the product ignores the headers and assumes squares". A is 2x3 and
+    // B is 3x2, so a square-reading implementation cannot produce the reference.
+    // Rewriting A's data as 2x3 of doubled values must DOUBLE every product entry.
+    const run = try runMulOut(0x65, 0, 0);
+    defer testing.allocator.free(run.img);
+    var doubled = mul_a;
+    for (&doubled) |*v| v.* *= 2;
+
+    const img2 = try imageWithSize(&.{
+        movImm(1, mul_a_addr),
+        movImm(2, mul_b_addr),
+        movImm(3, mul_out_addr),
+        accelWord(0x65, 3, 1, 2, 0, 0),
+        encode(0x01, 0, 0, 0),
+    }, accel_image_size);
+    defer testing.allocator.free(img2);
+    putMatrix(img2, mul_a_addr, 2, 3, &doubled);
+    putMatrix(img2, mul_b_addr, 3, 2, &mul_b);
+    var vm = Vm.init(img2);
+    _ = try vm.run(100);
+    try testing.expectEqual(@as(f64, 116), getF64(img2, mul_out_addr + 8));
+    try testing.expectEqual(@as(f64, 128), getF64(img2, mul_out_addr + 16));
+    try testing.expectEqual(@as(f64, 278), getF64(img2, mul_out_addr + 24));
+    try testing.expectEqual(@as(f64, 308), getF64(img2, mul_out_addr + 32));
+}
+
+/// Steps past the three `mov` setup words and returns the accelerator's fault.
+/// The step-by-step form is the existing idiom, and it is what yields the exact
+/// `Diagnostic` the CLI would render.
+fn mulOutFault(vm: *Vm) !struct { text: [1024]u8, len: usize } {
+    var i: usize = 0;
+    while (i < 3) : (i += 1) _ = try vm.step();
+    const s = try vm.step();
+    try testing.expect(s == .fault);
+    var out: [1024]u8 = undefined;
+    var w = std.Io.Writer.fixed(&out);
+    try s.fault.render(&w);
+    return .{ .text = out, .len = w.buffered().len };
+}
+
+fn expectRefused(vm: *Vm, needles: []const []const u8) !void {
+    const f = try mulOutFault(vm);
+    const text = f.text[0..f.len];
+    for (needles) |n| try testing.expect(std.mem.indexOf(u8, text, n) != null);
+    try testing.expect(!diagnostics.hasBareHexCode(text));
+    // main.zig renders into a fixed [1024]u8 and DROPS overflow with `catch {}`.
+    try testing.expect(std.mem.endsWith(u8, text, "."));
+    try testing.expect(text.len < 900);
+}
+
+test "matrix.mulout: a dimension mismatch is a sentence, never a wrong answer" {
+    // A says 2x3, B says 4x1: A's 3 columns cannot meet B's 4 rows. Nothing may be
+    // written — the destination header slot must still be zero afterwards.
+    const img = try imageWithSize(&.{
+        movImm(1, mul_a_addr),
+        movImm(2, mul_b_addr),
+        movImm(3, mul_out_addr),
+        accelWord(0x65, 3, 1, 2, 0, 0),
+        encode(0x01, 0, 0, 0),
+    }, accel_image_size);
+    defer testing.allocator.free(img);
+    putMatrix(img, mul_a_addr, 2, 3, &mul_a);
+    putMatrix(img, mul_b_addr, 4, 1, &[_]f64{ 1, 2, 3, 4 });
+    var vm = Vm.init(img);
+    try expectRefused(&vm, &.{ "matrix.mulout", "3 columns", "4 rows", "nothing was computed" });
+    try testing.expectEqual(@as(u64, 0), getU64(img, mul_out_addr));
+}
+
+test "matrix.mulout: an out-of-bounds header refuses, NAMING the address and the length" {
+    // Address 64 is where a fifth program word would go, so the header's own eight
+    // bytes are past the end of this 64-byte image.
+    const img = try imageWithSize(&.{
+        movImm(1, 64),
+        movImm(2, accel_data_base),
+        movImm(3, mul_out_addr),
+        accelWord(0x65, 3, 1, 2, 0, 0),
+        encode(0x01, 0, 0, 0),
+    }, 64);
+    defer testing.allocator.free(img);
+    var vm = Vm.init(img);
+    try expectRefused(&vm, &.{ "8 bytes at address 64", "64 bytes long", "no byte was touched" });
+}
+
+test "matrix.mulout: a header whose data would run past the image refuses before touching a byte" {
+    // A 16x2 header inside bounds whose declared 16x2 data (256 bytes) runs past
+    // the end of the image. B says 2x1, so the SIZES are consistent and only the
+    // bounds check can refuse — the check must come from the header's own numbers,
+    // not from how much room happens to be left over.
+    const near_end = accel_image_size - 8;
+    const img = try imageWithSize(&.{
+        movImm(1, near_end),
+        movImm(2, mul_b_addr),
+        movImm(3, mul_out_addr),
+        accelWord(0x65, 3, 1, 2, 0, 0),
+        encode(0x01, 0, 0, 0),
+    }, accel_image_size);
+    defer testing.allocator.free(img);
+    std.mem.writeInt(u32, img[near_end..][0..4], 16, .little);
+    std.mem.writeInt(u32, img[near_end + 4 ..][0..4], 2, .little);
+    putMatrix(img, mul_b_addr, 2, 1, &[_]f64{ 1, 2 });
+    var vm = Vm.init(img);
+    try expectRefused(&vm, &.{ "256 bytes", "no byte was touched" });
+    try testing.expectEqual(@as(u64, 0), getU64(img, mul_out_addr));
+}
+
+test "matrix.mulout: a misaligned data address is refused with a sentence, never cast" {
+    // A valid 2x3 header at an address 4 bytes off an 8-byte boundary. The header
+    // is only 4-aligned and is readable; the f64 data that follows it is NOT
+    // 8-aligned. A misaligned @alignCast would panic here; a refusal prints a
+    // sentence (rule E.3).
+    const odd_a = mul_a_addr + 4;
+    const img = try imageWithSize(&.{
+        movImm(1, odd_a),
+        movImm(2, mul_b_addr),
+        movImm(3, mul_out_addr),
+        accelWord(0x65, 3, 1, 2, 0, 0),
+        encode(0x01, 0, 0, 0),
+    }, accel_image_size);
+    defer testing.allocator.free(img);
+    putMatrix(img, odd_a, 2, 3, &mul_a);
+    putMatrix(img, mul_b_addr, 3, 2, &mul_b);
+    var vm = Vm.init(img);
+    try expectRefused(&vm, &.{ "not a multiple of 8 bytes" });
+}
+
+test "matrix.mulout: a non-zero rs3 or count is refused, not ignored" {
+    // Rule E's redundant-operand rule. A silently ignored field is the F34 class.
+    const with_rs3 = try imageWithSize(&.{
+        movImm(1, mul_a_addr),
+        movImm(2, mul_b_addr),
+        movImm(3, mul_out_addr),
+        accelWord(0x65, 3, 1, 2, 5, 0),
+        encode(0x01, 0, 0, 0),
+    }, accel_image_size);
+    defer testing.allocator.free(with_rs3);
+    putMatrix(with_rs3, mul_a_addr, 2, 3, &mul_a);
+    putMatrix(with_rs3, mul_b_addr, 3, 2, &mul_b);
+    var a = Vm.init(with_rs3);
+    try expectRefused(&a, &.{ "third source register", "must be zero" });
+
+    const with_count = try imageWithSize(&.{
+        movImm(1, mul_a_addr),
+        movImm(2, mul_b_addr),
+        movImm(3, mul_out_addr),
+        accelWord(0x65, 3, 1, 2, 0, 6),
+        encode(0x01, 0, 0, 0),
+    }, accel_image_size);
+    defer testing.allocator.free(with_count);
+    putMatrix(with_count, mul_a_addr, 2, 3, &mul_a);
+    putMatrix(with_count, mul_b_addr, 3, 2, &mul_b);
+    var b = Vm.init(with_count);
+    try expectRefused(&b, &.{ "count field must be zero", "6 was written" });
+}
+
+test "matrix.mulout: a zero side or a side over the limit refuses rather than computing" {
+    const zero = try imageWithSize(&.{
+        movImm(1, mul_a_addr),
+        movImm(2, mul_b_addr),
+        movImm(3, mul_out_addr),
+        accelWord(0x65, 3, 1, 2, 0, 0),
+        encode(0x01, 0, 0, 0),
+    }, accel_image_size);
+    defer testing.allocator.free(zero);
+    putMatrix(zero, mul_a_addr, 2, 0, &mul_a);
+    putMatrix(zero, mul_b_addr, 3, 2, &mul_b);
+    var a = Vm.init(zero);
+    try expectRefused(&a, &.{"no rows or no columns"});
+
+    const big = try imageWithSize(&.{
+        movImm(1, mul_a_addr),
+        movImm(2, mul_b_addr),
+        movImm(3, mul_out_addr),
+        accelWord(0x65, 3, 1, 2, 0, 0),
+        encode(0x01, 0, 0, 0),
+    }, accel_image_size);
+    defer testing.allocator.free(big);
+    putMatrix(big, mul_a_addr, 17, 3, &mul_a);
+    putMatrix(big, mul_b_addr, 3, 2, &mul_b);
+    var b = Vm.init(big);
+    try expectRefused(&b, &.{ "17 rows", "at most 16 by 16" });
+}
+
+test "0x62 matrix.mul is UNCHANGED by amendment 1.19: still refused, same sentence" {
+    // The pair that proves 0x65 did not steal 0x62's meaning. Both are dispatched
+    // from the same switch, so a careless edit could route 0x62 to accelMulOut.
+    const img = try imageWith(&.{accelWord(0x62, 1, 2, 3, 4, 0)});
+    defer testing.allocator.free(img);
+    var vm = Vm.init(img);
+    const s = try vm.step();
+    try testing.expect(s == .fault);
+    var buf: [2048]u8 = undefined;
+    const text = diagnostics.renderToBuffer(s.fault, &buf);
+    try testing.expect(std.mem.indexOf(u8, text, "matrix.mul") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "matrix.mulout") == null);
+    try testing.expect(std.mem.indexOf(u8, text, "E.5") != null);
 }
 
 test "a RESERVED §3.6 byte still refuses DIFFERENTLY from a defined one" {

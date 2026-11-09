@@ -141,6 +141,12 @@ pub const accelerators = [_]Accelerator{
     // unreachable from source; with `.takes_count = true` alone the only spelling
     // available was the one the VM rejects (a non-zero count field).
     .{ .opcode = 0x64, .name = "matrix.identity", .sources = 1, .takes_count = false },
+    // Amendment 1.19. A second multiply opcode, because 0x62 `matrix.mul` cannot be
+    // expressed: it names no matrix header. Here each matrix carries its own
+    // `rows:u32 | cols:u32` header in memory (rule A, rule B), so the word needs only
+    // the three addresses and every one of its four fields is used. Rule E.5 still
+    // governs 0x62, which keeps meaning "refused".
+    .{ .opcode = 0x65, .name = "matrix.mulout", .sources = 2, .takes_count = false },
     .{ .opcode = 0x70, .name = "fft.forward", .sources = 1, .takes_count = true },
     .{ .opcode = 0x71, .name = "fft.inverse", .sources = 1, .takes_count = true },
     .{ .opcode = 0x72, .name = "fft.ntt", .sources = 2, .takes_count = true },
@@ -266,7 +272,7 @@ pub const Opcode = enum(u8) {
         return null;
     }
 
-    /// §3.6 (amendment 1.1): the 13 assigned accelerator mnemonics. Everything
+    /// §3.6 (amendments 1.1 and 1.19): the 14 assigned accelerator mnemonics. Everything
     /// else in 0x60-0x8F is RESERVED and has no mnemonic; it is decoded and
     /// disassembled as raw bytes instead.
     ///
@@ -1609,16 +1615,25 @@ pub fn isSlotSyntax(text: []const u8) bool {
 /// disassembler's own output verbatim: `celeris64 dis a.bin > a.asm` followed by
 /// `celeris64 asm a.asm b.bin` reproduces the original bytes without the user
 /// having to strip anything first. That is the round trip people actually type.
+///
+/// The prefix is matched as the disassembler's EXACT shape — two leading spaces, a
+/// six-digit zero-padded address, two spaces — rather than as "any all-hex run
+/// before a colon". That earlier rule ate a legitimate label: a label written as
+/// `e00:` is all hex digits, so it was stripped as if it were an address and the
+/// name never reached `splitLabel`, making it definable but never referenceable.
+/// `foo:` was unaffected, which is why the defect survived — most labels are not
+/// hex-only, and the round-trip tests all used `dis` output, where the shape IS an
+/// address. Matching the real shape keeps the round trip and frees the name space.
 pub fn stripAddressPrefix(line: []const u8) []const u8 {
-    const colon = std.mem.indexOfScalar(u8, line, ':') orelse return line;
-    // The prefix must be all hex digits and nothing else, so a stray colon in an
-    // operand is never eaten.
-    const head = std.mem.trim(u8, line[0..colon], " \t");
-    if (head.len == 0) return line;
-    for (head) |c| {
-        if (!std.ascii.isHex(c)) return line;
+    // The disassembler prints `{d:0>6}:  ` — six digits, a colon, two spaces.
+    // Verified against its actual output: `000000:  mov R1, 1`, with no indent.
+    if (line.len < 10) return line;
+    var i: usize = 0;
+    while (i < 6) : (i += 1) {
+        if (!std.ascii.isDigit(line[i])) return line;
     }
-    return std.mem.trimStart(u8, line[colon + 1 ..], " \t");
+    if (line[6] != ':' or line[7] != ' ' or line[8] != ' ') return line;
+    return std.mem.trimStart(u8, line[9..], " \t");
 }
 
 pub fn stripComment(line: []const u8) []const u8 {
@@ -2602,4 +2617,47 @@ test "labels: a colon inside an operand is not mistaken for a label" {
     const yes = splitLabel("loop: add R1, R1, 1");
     try testing.expectEqualStrings("loop", yes.label.?);
     try testing.expectEqualStrings("add R1, R1, 1", yes.rest);
+}
+
+test "labels: a label whose name is all hex digits is still a label" {
+    // REGRESSION. `stripAddressPrefix` exists so `dis` output can be re-assembled
+    // verbatim, and it originally stripped ANY all-hex run before a colon. A label
+    // named `e00:` is all hex digits, so its name was eaten as if it were an address
+    // and never reached splitLabel: definable, but never referenceable. `foo:` was
+    // unaffected, and every round-trip test fed it real `dis` output, so the whole
+    // suite stayed green while a legal name was unusable. Found by an agent whose
+    // generated program happened to use one.
+    // The prefix stripper must leave a hex-only LABEL untouched, so the name still
+    // reaches splitLabel. (A label-only line has an empty `rest` and its name in
+    // `.label`; asserting on `rest` alone would pass for the wrong reason.)
+    const kept = stripAddressPrefix("e00:");
+    try testing.expectEqualStrings("e00:", kept);
+    const split = splitLabel(kept);
+    try testing.expectEqualStrings("e00", split.label.?);
+    try testing.expectEqualStrings("", split.rest);
+
+    // And it must still assemble and resolve end to end.
+    var prog = try assembleProgram(
+        \\mov R1, 1
+        \\branch R1, [EQUAL], e00
+        \\jump 8
+        \\e00:
+        \\halt
+    );
+    defer prog.deinit();
+    try testing.expectEqual(@as(usize, 4), prog.words.len);
+}
+
+test "regression: dis output is still stripped to the instruction" {
+    // The other half of the fix: matching the disassembler's EXACT shape must keep
+    // the round trip working, which is what the old all-hex rule was for.
+    try testing.expectEqualStrings("mov R1, 1", stripAddressPrefix("000000:  mov R1, 1"));
+    // The disassembler prints a SIX-digit address, so that is what is stripped.
+    // Seven digits is deliberately NOT the `dis` shape and must be left alone —
+    // asserting otherwise would widen the pattern back toward "any hex run".
+    try testing.expectEqualStrings("1234567:  halt", stripAddressPrefix("1234567:  halt"));
+    // A line that merely looks hex-ish must NOT be eaten.
+    try testing.expectEqualStrings("add R1, R2, R3", stripAddressPrefix("add R1, R2, R3"));
+    // Six digits but no colon-space shape is a label, not an address.
+    try testing.expectEqualStrings("abc123:", stripAddressPrefix("abc123:"));
 }

@@ -1,6 +1,6 @@
 # Celeris-64 (CLS64) Instruction Encoding Contract
 
-Document Version: 1.18
+Document Version: 1.19
 Status: **Normative** — all simulator, assembler and disassembler code MUST match this
 document. If code and this document disagree, one of them is a bug.
 
@@ -518,6 +518,7 @@ Each operation names its operands positionally, exactly as the model signature r
 | `0x62` | `matrix.mul`     | `rd, rs1, rs2`          | `matrix.multiply(a, b, out)` |
 | `0x63` | `matrix.transform` | `rd, rs1, count=N`    | `matrix.transformSoA(xs, ys, zs, m)`; the three streams are consecutive from `rs1`, `count` is elements **per stream** |
 | `0x64` | `matrix.identity` | `rd, count=N`          | `matrix.identity(n, out)` |
+| `0x65` | `matrix.mulout`   | `rd, rs1, rs2`          | `matrix.multiply(a, b, out)`, orders from the in-memory headers (Rule E.7) |
 | `0x70` | `fft.forward`    | `rd, rs1, count=N`      | `fft.fft(data, false)` |
 | `0x71` | `fft.inverse`    | `rd, rs1, count=N`      | `fft.fft(data, true)` |
 | `0x72` | `fft.ntt`        | `rd, rs1, rs2, count=N` | `fft.ntt(data, false)`, modulus in `rs2` |
@@ -651,6 +652,7 @@ ignored so no program can carry a meaning the operation does not have.
 | `0x60` `matrix.det` | `rs1` **value** = matrix address; `rd` receives the determinant | `n` = `rs3`, `1..15` (u4, `0` = 16); 8·n·n bytes at `rs1` | must be `0` | — | **executes** |
 | `0x61` `matrix.invert` | `rs1` **value** = input address, `rd` **value** = output address | `n` = `rs2`, `1..15` (u4, `0` = 16) | must be `0` | — | **executes** |
 | `0x62` `matrix.mul` | not expressible | — | — | — | **refused**, Rule E.5 |
+| `0x65` `matrix.mulout` | `rd` **value** = product address, `rs1` **value** = A address, `rs2` **value** = B address | each matrix is `rows:u32 \| cols:u32` at its address followed by row-major `f64` (Rule E.7); `rs3` and `count` must be `0` | must be `0` | — | **executes** |
 | `0x63` `matrix.transform` | `rs1` **address value** (stream base) | 4×4 `m` = 16 `f64` at `rs2`; three streams of `count` `f64` each, consecutive from `rs1` (`count = 0` refused) | elements **per stream** | `f64` elements | **executes** |
 | `0x64` `matrix.identity` | `rd` **value** = output address | `n` = `rs1`, `0..16`; `n = 0` is the empty matrix and is **not** an error, because `0` is a meaningful order here rather than a missing length | must be `0` (the order is in `rs1`, not here) | `f64` elements per side | **executes** |
 | `0x70` `fft.forward` | `rd` **value**, `rs1` **value** | — | `N` = `count`, `0` refused; `N` must be a power of two | **complex elements** (16 bytes) | **executes** |
@@ -714,6 +716,13 @@ A fourth option — splitting `matrix.mul` into two opcodes, one per operand ord
 it does not change the encoding. It is the right fix if this is wanted later, and it is
 recorded here so the next revision does not re-derive the shortage from scratch.
 
+> **Amendment 1.19 update (normative, kept below the original text).** That second opcode
+> now exists as **`0x65` `matrix.mulout`, Rule E.7** — but not as "one per operand order".
+> The orders are not what forces a split: they are read from each matrix's own
+> `rows:u32 | cols:u32` header, the form Rule A already defines, so one opcode serves every
+> shape. `0x62` is **not** repurposed and its refusal above still stands verbatim; a reader
+> who wants a multiply that runs uses `0x65`.
+
 So `matrix.mul` joins `codec.decompress` as refused. Its row above is left in the table
 with the reason rather than deleted, because the opcode is still assigned by 1.1 and a
 reader who assembles `matrix.mul` must be able to find out why it will not run.
@@ -727,6 +736,56 @@ model (`fft.ntt`) takes no modulus parameter at all: it always works modulo
 rule therefore applies to `rs2`: it must be zero. A revision that gives the model a
 modulus parameter should lift this reservation in the same change that lifts the model
 limit, not before.
+
+**Rule E.7 — `matrix.mulout` (0x65) is the multiply whose operands DO fit, and it is not a
+redefinition of `matrix.mul`.** Amendment 1.18 was right to refuse `0x62`: that word has
+three addresses to name and only `rd`, `rs1` and `rs2` to name them with, because it also
+needs two orders and `rs3`/`count` are required to be zero by the redundant-operand rule.
+"Pick a convention for the orders" was the failure mode F36 exists to prevent — a plausible
+wrong matrix.
+
+The shortage was never the *addresses*; it was the *orders*. Amendment 1.19 adds a second
+opcode for the case where the orders do not have to be in the word at all, because **each
+matrix carries its own header in memory** — the form Rule A already defines:
+
+```
+  byte 0            byte 4            byte 8 ...
++-----------------+-----------------+-------------------------------+
+|  rows (u32 LE)  |  cols (u32 LE)  |  row-major f64 data ...       |
++-----------------+-----------------+-------------------------------+
+```
+
+- **`rs1`'s address** holds input A, **`rs2`'s** holds input B, **`rd`'s** holds the product.
+  All three are Rule A **address values** (not register indices), and all three must be
+  **8-byte aligned**, because the f64 data that follows every header is read as `f64`.
+- **The product's header is WRITTEN by the operation, not read.** It is set to
+  (`A.rows`, `B.cols`), so the product is a self-describing matrix and can itself be an
+  input to a later `matrix.mulout`. Whatever the destination bytes held before is
+  overwritten; this is the one row in §3.6 that writes a header.
+- **The orders come from the data.** `a.cols` must equal `b.rows`; anything else is a
+  diagnostic naming both shapes, and nothing is written.
+- **`rs3` and `count` must be zero**, per Rule E's redundant-operand rule. There is no
+  length to carry: the region lengths are `8 + 8·rows·cols`, derived from the headers.
+- **A side is 1..16.** `0` on either side is a diagnostic (a matrix with no entries has no
+  product), and so is anything above 16. The limit is **not** a machine limit and is not a
+  performance statement: `matrix.multiply` accumulates into a fixed `[256]f64` stack buffer
+  so that no allocation happens inside the execution loop (Rule E.4), and 256 covers every
+  product up to 16×16. A larger matrix refuses with a sentence rather than truncating.
+- **Every header and every data region is bounds-checked and alignment-checked before the
+  first byte is touched** (Rule E.3). A header that is itself in bounds but whose declared
+  data would run past the image is refused by the header's own numbers, not by whatever
+  room happens to be left.
+- **`rd` is not rewritten.** Unlike `matrix.det`, this row's entire result is in memory, so
+  there is no scalar to reinterpret into a register; `rd` keeps holding the address it
+  named. Rule E.2 does not apply to it.
+- **`matrix.mul` (0x62) is unchanged.** It still refuses with Rule E.5's sentence. A reader
+  who assembles `matrix.mul` and wants it to run should assemble `matrix.mulout` and give
+  its matrices headers; nothing is silently re-routed.
+
+The rejected alternative for `0x65` was to read `count` as a shared side length and assume
+both matrices square. It is rejected because it narrows the operation to square products,
+which the model does not require, and because it would still not name which of `rs1`/`rs2`
+is on the left — the exact ambiguity that made `0x62` unusable.
 
 **Rule E.4 — the operation must not allocate.** All slices are views into the flat memory
 model (§2.3), per AGENTS.md §4.1. No accelerator operation may allocate inside the
@@ -953,3 +1012,4 @@ The Phase 4 RTL consumes §2–§5 directly, so an encoding change now invalidat
 and its testbench as well as the four software components above.
 
 | 1.18 | 2026-11-09 | **§3.6 gains its missing operand arithmetic (amendment 1.18), closing F36's contract half: ELEVEN of thirteen accelerators now execute, TWO stay refused.** Amendment 1.1 fixed which *field* holds which operand and stopped there, so `docs/STATUS.md` F36 recorded that the contract named a matrix with no dimension, an output buffer with no address, and a `count` with no source and no unit — and both the simulator and the RTL correctly refused all thirteen rather than invent one. **No bit layout changed and no field was added**; the amendment works within `rs2`/`rs3`/`reserved`/`count` and says so explicitly. Rules added: (A) an operand register named as an address holds the **address value**, not an index, with exactly two exceptions — the two matrix-header forms that read a register as `rows:u32 | cols:u32`; (B) matrix data is row-major `f64`; (C) `codec.compress`'s output goes to a **normative fixed 256-byte workspace at byte 65 280**, whose availability is a **CHECKED PRECONDITION** — an image under 65 536 bytes refuses with a sentence naming the address and length, touching no byte; (D) **§3.6 line 490's "derive the count from the destination register" is RETRACTED IN PLACE at line 490 and superseded for every operation** — `count = 0` is a diagnostic error wherever the operation needs a length, because reading `rd` as an input count names one register as both input and output and imposes an unstated calling convention; (E) a per-operation table giving every address, every dimension source, every output and every unit, with **redundant operands required to be zero rather than ignored**; (E.6) `fft.ntt`'s `rs2` is reserved-zero because the model takes no modulus parameter, so accepting one and ignoring it would be the F34 "validated but dropped" class. **The dimension decision is the load-bearing one:** `matrix.det` takes `n` from `rs3` (its `rs1` is the matrix address and `rd` receives the scalar result, so `rs2` and `rs3` were the only free fields); `matrix.invert` takes `n` from `rs2` because its `rs3` is needed for nothing else while `rs1`/`rd` are the input and output addresses; `matrix.identity` takes its order from `rs1` and requires `count = 0`, since making `count=N` the order was the only spelling the old table allowed and it was self-contradictory. `matrix.transform`'s rigid-body `m` is at the address in `rs2`, the only free field on that row. **TWO rows remain refused, and each for a stated reason that is not a missing constant.** (a) **`matrix.mul` (0x62)** needs *three* addresses and *two* orders — five inputs for four fields. Reading an order from `count`, deriving the product's address from an input's extent, and aliasing one matrix's header into another's data were each considered and rejected (Rule E.5); the honest fix is a second opcode, which an amendment that does not change the encoding may not add. (b) **`codec.decompress` (0x81)** needs an `out.len` bound, all five fields are spoken for on its row, and reusing `compress`'s 256-byte workspace would silently reject valid inputs whose decompressed form exceeds 256 bytes — a narrowed domain, not a missing number (Rule E.1). **A correction to this row's own first draft, kept rather than overwritten:** it claimed Rule C's workspace sits in "the 64 KiB image every execution entry point allocates". That was **false** — `src/crossarch.zig:42` allocates 4 672 bytes, `src/examples.zig:73` 20 480, and `Vm.init` accepts any slice, so 65 536 is a CLI convention and not a machine property. Rule C now states the precondition and the small-image refusal mode instead of assuming it. Verification is recorded in `docs/STATUS.md` F36's closing entry; CLS64 has no LLVM backend, so every word quoted for these operations is checked against this repository's own decoder and encoder pair, which is self-consistency and not independent verification. |
+| 1.19 | 2026-11-09 | **A fourteenth accelerator opcode: `matrix.mulout` (0x65), which EXECUTES; `matrix.mul` (0x62) is untouched and still refuses.** Amendment 1.18 declined to invent a matrix-multiply convention and was right to: its word has three addresses to name and could carry only two, and picking a rule for the two missing orders would have produced a plausible wrong matrix. **This amendment does not relax that refusal.** It adds a second opcode for the case where the fields genuinely suffice, because **the orders do not have to be in the word** — each matrix carries its own `rows:u32 | cols:u32` header in memory, which is Rule A's header form that 1.18 already defined. So `0x65` needs only the three **addresses** (`rd` = product, `rs1` = A, `rs2` = B), which fit the existing layout exactly, with `rs3` and `count` required to be zero by Rule E's redundant-operand rule. Rule E.7 states the whole operation: all three addresses are Rule A **address values** and must be 8-byte aligned; the product's header is **WRITTEN** as (`A.rows`, `B.cols`) and is the one header in §3.6 the operation does not read, so a product is itself a valid input; `a.cols` must equal `b.rows` or nothing is written; a side is `1..16`, and that limit is the fixed `[256]f64` accumulator `matrix.multiply` uses to stay allocation-free (Rule E.4), **not** a machine or timing statement — a larger matrix refuses with a sentence rather than truncating; every header and data region is bounds- and alignment-checked before the first byte is touched (Rule E.3), a header in bounds whose declared data would overflow being refused from the header's own numbers; and `rd` is **not** rewritten, because this row's result is entirely in memory and Rule E.2's reinterpretation has nothing to carry. **The rejected alternative** was to read `count` as a shared square side: it narrows the operation to square products and still does not say which input is on the left, which is precisely the ambiguity that made `0x62` unusable. Rule E.5 gains a note beneath its original text rather than a rewrite: the "second opcode" it predicted now exists, but not as one opcode per operand order, and `0x62` is not re-routed. Verified end to end through the CLI (`asm` -> `run-bin`) against a product computed independently in Python — `[[1,2,3],[4,5,6]]` times `[[7,8],[9,10],[11,12]]` equals `[[58,64],[139,154]]` — with the program loading every element back and halting only when all four match, plus tests for a dimension mismatch, an out-of-bounds header, an out-of-bounds data region, a misaligned address, non-zero `rs3`/`count`, a zero and an oversized side, and a test pinning that `0x62` still refuses. CLS64 has no LLVM backend, so these words are checked only against this repository's own decoder and encoder pair: that is self-consistency, not independent verification. |
