@@ -37,7 +37,7 @@ rm -rf .zig-cache && ~/.local/zig/zig build test --summary all
   -> Build Summary: 53/53 steps succeeded; 1016/1016 tests passed   exit 0
 
 bash tests/mulout_e2e.sh           -> 6/6 checks passed        exit 0
-~/.local/zig/zig build examples    -> 11 kernels x 4 ISAs, all byte-equivalent
+~/.local/zig/zig build examples    -> 12 kernels x 4 ISAs, all byte-equivalent
 ~/.local/zig/zig build audit       -> 9/9 enforcement points, all 9 rejected when set
 ~/.local/zig/zig build live-check  -> all 232 recorded facts still reproduce
 ~/.local/zig/zig build crossarch   -> 8 rows, no !! warnings
@@ -215,14 +215,34 @@ examples build fail. Signed and unsigned genuinely differ here (`0x7ffdac59377ba
 
 ## 5. Analyzer breadth — delivered and independently verified
 
-Three new sound rules in `src/analyzer.zig`: `select` with the same register in both arms,
-`field.extract` at offset 0 width 64, `field.insert` at offset 0 width 64. Each is decided
-by the instruction word alone, which is the module's soundness rule.
+**Four new sound rules** in `src/analyzer.zig`, each decided by the instruction word
+alone, which is the module's soundness rule:
 
-**Seven rejected rules** are recorded in the module header with the correct program that
-breaks each — including `matmul_8x8`'s legitimate repeated arithmetic, `p1_zeroext`'s
-deliberate write chain, and `tests/mulout_e2e.sh`'s intentional `jump 400000` fault trap.
-**A rejected rule honestly documented is worth as much as an accepted one here.**
+- `select` with the same register in both arms (first batch);
+- `field.extract` at offset 0 width 64, and `field.insert` at offset 0 width 64 (first
+  batch), both confirmed by running `src/field.zig`: `extract(v, 0, 64) == v` and
+  `insert(base, v, 0, 64) == v`;
+- `and`/`or` with one register on both sides (identity) and `xor`/`sub` with one register
+  on both sides (constant zero), added second. Confirmed by tracing the simulator:
+  `and R2, R1, R1` and `or R2, R1, R1` leave R2 = R1, while `xor R2, R1, R1` and
+  `sub R2, R1, R1` leave R2 = 0.
+
+The two new rules are guarded on `rs1 == rs2 and rs1 != 0 and imm == 0`, which is the
+whole soundness argument: §3.1's encoding contract reads the operand field as an
+immediate exactly when imm28 is non-zero, so a register form always encodes `imm == 0`.
+Verified by assembling `and R1, R2, 0` and `and R1, R2, R2` and comparing the words —
+they differ, and only the second disassembles back to a register form. **Both rules were
+mutation-tested by the Lead in throwaway copies:** deleting the `rs1 == rs2` guard turns
+the negative test red; deleting the rule entirely turns exactly the two positive tests
+red and leaves the other 57 green.
+
+**Thirteen rejected rules** are recorded in the module header with the correct program or
+encoding fact that breaks each — including `matmul_8x8`'s legitimate repeated arithmetic,
+`p1_zeroext`'s deliberate write chain, `tests/mulout_e2e.sh`'s intentional `jump 400000`
+fault trap, and four shapes that **cannot be assembled at all** (width-0 fields, chunk-0
+streams) or **cannot be told apart from a correct one** (`shl`/`shr` by 0, ALU immediate
+zero — both collide with the register form in the encoding). **A rejected rule honestly
+documented is worth as much as an accepted one here.**
 
 `src/diagnostics.zig` grew **50 lines, additive only** — verified mechanically as 50
 insertions / 0 deletions, with `git diff -U0 | grep '^-[^-]'` empty. New constructors live
@@ -237,11 +257,12 @@ test really exercises the shipped programs rather than only fixtures.
 
 ## 6. What remains
 
-1. **More example kernels.** Eleven are delivered: `fused_stream_add`, `stream_copy_sum`,
-   `count_rises`, `band_count`, `loop_sum`, `byte_sum`, `word_sum`, `stride_sum`,
-   `matmul_8x8`, `signed_max`, `xor_reduce`. The suite runs 11 kernels x 4 ISAs.
-   **Of the shapes the objective named, only struct-of-arrays traversal is left** — branch
-   control flow, memory copy and bit-manipulation are all covered.
+1. **More example kernels.** Twelve are delivered: `fused_stream_add`, `stream_copy_sum`,
+   `count_rises`, `band_count`, `xor_reduce`, `soa_combine`, `loop_sum`, `byte_sum`,
+   `word_sum`, `stride_sum`, `matmul_8x8`, `signed_max`. The suite runs 12 kernels x 4 ISAs.
+   **Every shape the objective named is now covered** — branch control flow, memory copy,
+   bit-manipulation with a non-identity result, and struct-of-arrays traversal as of
+   `soa_combine`. Further kernels are breadth, not coverage of a named gap.
 
    The rule for each new kernel is in §4 and F41, and it has earned its keep three times:
    **verify every instruction against `src/isa_*.zig` before measuring**, hand-write the
@@ -280,13 +301,18 @@ test really exercises the shipped programs rather than only fixtures.
 5. **`cap.*`** stays decode-only. §3.5 v1.12 explains why: the register pair has no
    `length` bit position, so a capability cannot be reconstructed. Needs a §6 redesign, not
    a bug fix.
-6. **CLS64 loses nine of the ten example kernels** — but NOT all of them any more.
+6. **CLS64 loses eleven of the twelve example kernels** — but NOT all of them any more.
    `stream_copy_sum` is the first WIN: 1801 retired against RISC-V's 3342, AArch64's 3853
    and x86-64's 3085. It wins because the kernel is **purely streaming** — one fused
    `stream.copy` replaces the other three ISAs' entire 256-iteration copy loop — and the
    accounting closes (see `docs/STATUS.md` F42). Its counterpart is `fused_stream_add`,
    which declared a win and **falsified it**: that kernel must also *sum* its array, and
    the 256 scalar iterations of non-uniform work ate the saving.
+
+   `soa_combine` is the newest loss and an honest one: it declared `expected_loss`, and the
+   measurement agreed — CLS64 1419 simulated retired against RISC-V's 1293, AArch64's 1419
+   and x86-64's 1419. The body is `load, load, mul, add, add` plus two cursor bumps on every
+   ISA, so the difference is loop overhead alone.
 
    The single rule that explains both: **the stream engine wins when the kernel is purely
    streaming, and loses when the same kernel also needs per-element work.** Do not "fix"

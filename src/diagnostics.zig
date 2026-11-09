@@ -468,6 +468,36 @@ pub fn insertIdentity(file: []const u8, line: usize, text: []const u8) Diagnosti
     };
 }
 
+/// An `and` or `or` whose two sources are the SAME register. §3.1 computes
+/// `lhs OP rhs` on the register forms, and `x & x` and `x | x` are both `x`, so the
+/// instruction writes its first source to its destination unchanged.
+pub fn selfIdentity(file: []const u8, line: usize, text: []const u8) Diagnostic {
+    return .{
+        .severity = .warning,
+        .file = file,
+        .line = line,
+        .finding = "combines a register with itself, which leaves that register unchanged",
+        .offending = text,
+        .expected = "two different registers, or a `mov` when copying the register was the whole intent",
+        .detail = "Every bit of `and`'s result is set only where both sources have it, and every bit of `or`'s is set where either does. With one register on both sides those are the same bits the register already had, so the destination receives that register's own value and the instruction is a `mov` of it.",
+    };
+}
+
+/// An `xor` or `sub` whose two sources are the SAME register. `x ^ x` and `x - x`
+/// are both zero for every value of `x`, so the destination is written a constant
+/// and neither source's contents can reach the result.
+pub fn selfZeroes(file: []const u8, line: usize, text: []const u8) Diagnostic {
+    return .{
+        .severity = .warning,
+        .file = file,
+        .line = line,
+        .finding = "subtracts or exclusive-ors a register with itself, so the destination is always zero",
+        .offending = text,
+        .expected = "two different registers, or `mov` of a zero register when zero was what was wanted",
+        .detail = "Subtracting a value from itself leaves nothing, and exclusive-or of a value with itself sets no bit, whichever value the register holds. The result is zero for every input, so the destination does not depend on either source and the register contents cannot be what the result expresses.",
+    };
+}
+
 /// A label written on the line of an instruction that cannot be a transfer target.
 /// `text` is the whole line (the label and its instruction), because that is what
 /// the reader has to look at to see the problem.

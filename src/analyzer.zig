@@ -65,6 +65,28 @@
 //!     instruction on any path, and `count_rises` legitimately pairs a `compare`
 //!     with `[GREATER]` — adjacent in the listing, which is NOT adjacent at run
 //!     time, because `call`, `ret`, `jump` and `thread.*` all move control.
+//!   - "a `shl` or `shr` by the immediate zero". §3.1 reads the operand field as an
+//!     immediate exactly when imm28 is non-zero, so `shl R1, R2, 0` and `shl R1, R2,
+//!     R0` ARE THE SAME WORD — assembling `shl R1, R2, 0` and disassembling it back
+//!     prints `shl R1, R2, R0`. The instruction word cannot say which the author
+//!     meant, so a finding here would be a guess about intent, and a shift by a
+//!     register that happens to hold zero is a correct shifting program.
+//!   - "an ALU instruction that adds or subtracts the immediate zero". Same encoding
+//!     contract, same collision: `add R0, R1, 0` assembles to the word that
+//!     disassembles as `add R0, R1, R0`. The distinction is destroyed at encode time.
+//!   - "a `field` with width 0". Width 0 cannot reach an instruction: `field.zig`'s
+//!     `mask(0)` returns `error.ZeroWidth` and `parseChunk`-style guards refuse it, so
+//!     there is no such instruction word to warn about. Reporting it would be
+//!     describing a program that cannot be assembled.
+//!   - "a `stream.*` with a chunk of 0". `stream.zig` refuses it as
+//!     `error.ChunkNotPositive` and the assembler's chunk parser enforces a minimum of
+//!     1, so, as with width 0, the shape cannot be assembled.
+//!   - "a `load` or `store` at displacement 0". That is how this architecture writes
+//!     the plain base-register form — `load R8, [R7+0]` — and it appears fourteen
+//!     times across the example kernels. It is ordinary addressing, not a mistake.
+//!   - "a `mov` of the immediate zero". Recorded thirty-two times across the example
+//!     kernels, every one of them a correct register clear (an accumulator or a
+//!     counter starting at zero). Clearing a register is what `mov` is for.
 //!   - "a `select` whose arms are one register", "a `field.extract` at offset 0
 //!     width 64" and "a `field.insert` at offset 0 width 64" ARE reported: each is
 //!     decided by the instruction word alone, and none appears in any program this
@@ -120,6 +142,7 @@ pub fn analyze(insns: []const Analyzed, file: []const u8) Findings {
         // needs a second pass, a worklist, or any state that outlives this loop.
         degenerateSelect(a, file, &out);
         degenerateField(a, file, &out);
+        redundantAlu(a, file, &out);
     }
     return out;
 }
@@ -207,6 +230,41 @@ fn degenerateField(a: Analyzed, file: []const u8, out: *Findings) void {
     switch (a.insn.opcode) {
         .field_extract => add(out, diag.extractIdentity(file, a.line, a.text)),
         .field_insert => add(out, diag.insertIdentity(file, a.line, a.text)),
+        else => {},
+    }
+}
+
+/// `and`/`or` with one register on BOTH sides, and `xor`/`sub` with one register on
+/// both sides.
+///
+/// §3.1's register forms compute `lhs OP rhs` from the two source registers, so
+/// `and rd, r, r` and `or rd, r, r` both write `r` unchanged (`vm.zig`'s `alu` takes
+/// the `rs2` path whenever no immediate reached the decoder), while `xor rd, r, r`
+/// and `sub rd, r, r` write zero for every value `r` holds. All four are decided by
+/// the two source-register indices in the instruction word.
+///
+/// WHY AN IMMEDIATE CANNOT BE MISTAKEN FOR ONE OF THESE: §3.1's encoding contract
+/// reads the operand field as an immediate exactly when imm28 is NON-zero, so a
+/// register form always encodes `imm == 0` and an immediate of zero encodes `imm ==
+/// 0` too — the two are told apart only by `rs2`, which the assembler leaves at the
+/// register the source named. `and R1, R2, 0` therefore encodes `rs2 = 0` and this
+/// rule stays silent on it, while `and R1, R2, R2` encodes `rs2 = 2` and fires.
+/// Verified by assembling both: the words differ, and only the second disassembles
+/// back to a register form.
+///
+/// `rs1 == 0` is excluded because R0 is an ordinary general-purpose register here
+/// (§2.1 lists ZERO separately), so `and R1, R0, R0` names a real register and the
+/// rule's arithmetic still holds — but reading `0` back as a register index is the
+/// shape a reader most easily mistakes for the immediate form, so it is left out
+/// rather than argued about. A shift by zero is NOT reported: `shl R1, R2, 0`
+/// encodes the same `imm == 0` register form as `shl R1, R2, R0`, and the instruction
+/// word cannot distinguish them, so that rule would be a guess.
+fn redundantAlu(a: Analyzed, file: []const u8, out: *Findings) void {
+    if (a.insn.imm != 0) return;
+    if (a.insn.rs1 != a.insn.rs2 or a.insn.rs1 == 0) return;
+    switch (a.insn.opcode) {
+        .and_, .or_ => add(out, diag.selfIdentity(file, a.line, a.text)),
+        .xor_, .sub => add(out, diag.selfZeroes(file, a.line, a.text)),
         else => {},
     }
 }
@@ -326,6 +384,60 @@ test "NEGATIVE: a negative branch offset is not confused with one instruction" {
     var bufs: [max_findings][1024]u8 = undefined;
     try run("t.asm", "mov R1, 0\nback:\nadd R1, R1, 1\nbranch R1, [LESS], back\nhalt\n", &r, &bufs);
     try testing.expectEqual(@as(usize, 0), r.findings.len);
+}
+
+test "and/or with one register on both sides is reported as an identity" {
+    var r: Rendered = undefined;
+    var bufs: [max_findings][1024]u8 = undefined;
+    try run("t.asm", "mov R1, 5\nand R2, R1, R1\nhalt\n", &r, &bufs);
+    try testing.expect(r.check("combines a register with itself"));
+
+    var r2: Rendered = undefined;
+    var bufs2: [max_findings][1024]u8 = undefined;
+    try run("t.asm", "mov R1, 5\nor R2, R1, R1\nhalt\n", &r2, &bufs2);
+    try testing.expect(r2.check("combines a register with itself"));
+}
+
+test "xor/sub with one register on both sides is reported as a constant zero" {
+    var r: Rendered = undefined;
+    var bufs: [max_findings][1024]u8 = undefined;
+    try run("t.asm", "mov R1, 5\nxor R2, R1, R1\nhalt\n", &r, &bufs);
+    try testing.expect(r.check("the destination is always zero"));
+
+    var r2: Rendered = undefined;
+    var bufs2: [max_findings][1024]u8 = undefined;
+    try run("t.asm", "mov R1, 5\nsub R2, R1, R1\nhalt\n", &r2, &bufs2);
+    try testing.expect(r2.check("the destination is always zero"));
+}
+
+test "NEGATIVE: the immediate and register forms are told apart by rs2, not by the mnemonic" {
+    // §3.1 reads the operand field as an immediate exactly when imm28 is non-zero, so
+    // `and R1, R2, 0` and `and R1, R2, R2` are different words and only the second is
+    // a self-combine. Assembled and compared here, because the rule's whole soundness
+    // rests on it: a rule that fired on the immediate form would flag `and R1, R2, 0`,
+    // which is what clearing a register with `and` looks like.
+    const asmb2 = asmb.Assembler;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    var a1 = asmb2.init(arena.allocator());
+    var a2 = asmb2.init(arena.allocator());
+    var d: Diagnostic = undefined;
+    const p1 = try a1.assembleSource("imm", "and R1, R2, 0\n", &d);
+    const p2 = try a2.assembleSource("reg", "and R1, R2, R2\n", &d);
+    try testing.expect(p1.words[0] != p2.words[0]);
+
+    var r: Rendered = undefined;
+    var bufs: [max_findings][1024]u8 = undefined;
+    try run("t.asm", "and R1, R2, 0\nhalt\n", &r, &bufs);
+    try testing.expectEqual(@as(usize, 0), r.findings.len);
+
+    // `shl R1, R2, 0` is NOT reported: it encodes the register form and disassembles
+    // as `shl R1, R2, R0`, so the word does not say which was meant.
+    var r2: Rendered = undefined;
+    var bufs2: [max_findings][1024]u8 = undefined;
+    try run("t.asm", "shl R1, R2, 0\nshr R1, R2, 0\nhalt\n", &r2, &bufs2);
+    try testing.expectEqual(@as(usize, 0), r2.findings.len);
 }
 
 test "NEGATIVE: no finding on any CLS64 program this repository ships" {
