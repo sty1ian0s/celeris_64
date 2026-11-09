@@ -334,7 +334,10 @@ pub const Vm = struct {
         _ = pc;
         _ = word;
         const width = streaming.ElemWidth.fromEncoded(@intFromEnum(st.width)) catch return error.BadElementWidth;
-        const ptr_reg = self.regs.read(st.rs1);
+        // §3.4: for add/copy/fill the pointer is `rs1` (the bracketed register);
+        // for `setp` it is `rd`, because setp's operand text is
+        // `stream.setp <ptr>, <stride>` and it has no `rs1` field at all.
+        const ptr_reg = if (st.op == 0x43) self.regs.read(st.rd) else self.regs.read(st.rs1);
         var engine = streaming.State.init(self.mem, ptr_reg);
 
         switch (st.op) {
@@ -343,7 +346,14 @@ pub const Vm = struct {
             0x42 => try engine.fill(self.regs.read(st.rd), st.chunk, width),
             0x43 => {
                 // `stream.setp`: pointer register = current + signed 40-bit stride.
-                self.regs.write(st.rs1, @bitCast(@as(i64, @bitCast(ptr_reg)) +% st.stride));
+                //
+                // F19 (VM half): the pointer register for `setp` is `rd`, not
+                // `rs1`. The assembler emits `stream.setp R1, -16` as rd=1,
+                // rs1=0, and §3.4 gives `setp` no `rs1` — the decoder now rejects
+                // a non-zero one. This line wrote `st.rs1`, so the instruction
+                // updated R0 and left the named pointer untouched. Invisible
+                // until now because the test fixture set rs1=1 by hand.
+                self.regs.write(st.rd, @bitCast(@as(i64, @bitCast(ptr_reg)) +% st.stride));
                 return;
             },
             else => return error.NotAStreamPointer,
@@ -948,7 +958,11 @@ test "field constraints produce diagnostics rather than silent wraps (spec 3.3.1
 
     var buf: [512]u8 = undefined;
     const text = diagnostics.renderToBuffer(s1.fault, &buf);
-    try testing.expect(std.mem.indexOf(u8, text, "offset + width <= 64") != null);
+    // F24: the decoder now rejects this word before the VM ever sees it, so the
+    // sentence comes from the decode-time diagnostic. It still states the rule,
+    // in words rather than symbols — §7 forbids a bare hex code, not prose.
+    try testing.expect(std.mem.indexOf(u8, text, "sum is at most 64 bits") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "3.3.1") != null);
     try testing.expect(!diagnostics.hasBareHexCode(text));
 }
 
@@ -1074,7 +1088,14 @@ fn vm_load32(img: []u8, at: u64, value: u32) void {
 test "stream.setp applies the signed 40-bit stride to the pointer register" {
     const img = try imageWith(&.{
         encode(0x19, 1, 0, aluOperand(0, .full, 64)), // R1 = 64
-        encode(0x43, 0, 1, @as(u48, @bitCast(@as(i48, -16)))), // setp R1, stride -16
+        // F19: `setp` names its pointer with `rd` (here R1) and carries nothing
+        // in `rs1`, which must be zero — a non-zero value is now rejected.
+        // §3.4: the stride occupies operand[39:0] ONLY, and [47:40] is reserved.
+        // The old fixture wrote @bitCast(@as(i48, -16)), which sign-extends into
+        // [47:40] and produces operand 0xFFFFFFFFFFF0 — a word the contract
+        // reserves and the assembler never emits. Masked to 40 bits, matching
+        // what `stream.setp R1, -16` actually assembles to.
+        encode(0x43, 1, 0, @as(u48, @as(u40, @bitCast(@as(i40, -16))))), // setp R1, stride -16
         encode(0x01, 0, 0, 0),
     });
     defer testing.allocator.free(img);
@@ -1165,10 +1186,16 @@ test "REGRESSION: SP, LR and FLAGS are legal destinations and still execute norm
     try testing.expectEqual(@as(u64, 48), vm.regs.pc);
 }
 
-test "REGRESSION: reading PC as a source operand is still allowed (SS4 makes it readable)" {
-    // Only a WRITE to index 14 is refused; §4 says PC is readable. Note this uses an
-    // ADD, not a mov: §3.1 defines mov as `rd = src2` with rs1 IGNORED, so `mov R0, PC`
-    // is not a PC read at all. Register form is selected by imm == 0.
+test "REGRESSION: PC as a source operand is rejected at decode (F27)" {
+    // This test previously asserted the OPPOSITE, citing "§4 says PC is readable".
+    // §4's table does say "readable", but the paragraph beneath it is explicit:
+    // "in rs1/rs2 it is legal for SP, LR and FLAGS and a diagnostic error for PC",
+    // and the assembler has always refused `add R0, PC, R1`. The decoder accepted
+    // it, so `run-bin` executed a word no source line can express — F27, the same
+    // two-layer gap as F8. The contract was clarified rather than the behaviour
+    // relaxed, so this test now pins the rejection.
+    //
+    // SP (12), LR (13) and FLAGS (15) remain legal sources; only PC (14) is not.
     const img = try imageWith(&.{
         encode(0x00, 0, 0, 0), // nop -> PC 8
         // R0 = R1(0) + PC ; rs1 = PC (14), rs2 = 1, imm = 0 -> register form
@@ -1177,11 +1204,13 @@ test "REGRESSION: reading PC as a source operand is still allowed (SS4 makes it 
     });
     defer testing.allocator.free(img);
 
-    var vm = Vm.init(img);
-    _ = try vm.run(10);
-    // PC was 8 when the add read it, so R0 = 0 + 8 = 8. A refused READ would fault.
-    try testing.expectEqual(@as(u64, 8), vm.regs.read(0));
-    try testing.expect(!vm.halted or vm.regs.read(0) == 8);
+    // The word must not decode at all: the decoder is the layer that sees a blob.
+    try testing.expect(decoding.decode(encode(0x10, 0, 14, aluOperand(1, .full, 0))) == .err);
+
+    // And the legal sources still decode, so the check is not over-broad.
+    try testing.expect(decoding.decode(encode(0x10, 0, 12, aluOperand(1, .full, 0))) == .ok);
+    try testing.expect(decoding.decode(encode(0x10, 0, 13, aluOperand(1, .full, 0))) == .ok);
+    try testing.expect(decoding.decode(encode(0x10, 0, 15, aluOperand(1, .full, 0))) == .ok);
 }
 
 test "REGRESSION: jump, call and ret still set PC deliberately and are never clobbered" {
