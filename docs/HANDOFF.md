@@ -1,6 +1,6 @@
-# Session handoff — 2026-11-09 (second session)
+# Session handoff — 2026-11-09 (third session)
 
-Supersedes the earlier handoff of the same date. Everything below was verified by
+Supersedes the second-session handoff of the same date. Everything below was verified by
 running something; claims that were not observed are marked as such.
 
 ---
@@ -8,276 +8,271 @@ running something; claims that were not observed are marked as such.
 ## 1. Repository state
 
 ```
-HEAD         fb3782e  feat(isa): integer multiply on AArch64 and x86-64, and an 8x8 matmul example
-remote       origin/main, IN SYNC as of fb3782e (pushed)
-working tree CLEAN (at fb3782e)
+HEAD         b081f6f  docs(status): F41 — correct the shift semantics
+remote       origin/main, IN SYNC as of b081f6f (pushed)
+working tree CLEAN (at b081f6f)
 ```
 
-Fifteen commits landed this session, in this order:
+Four commits landed this session, in this order:
 
 | Commit | What |
 |---|---|
-| `07c0017` | `feat(asm)`: labels — branch/jump targets can be named (v1.18) |
-| `025af04` | `fix(crossarch)`: CLS64's "scalar" row is a real loop now (closes **F32**) |
-| `66aee85` | `docs(status)`: F32 closed, F35 recorded, one draft of ours retracted |
-| `875d65f` | `docs`: the published tables still said 11 — corrected to 68 |
-| `0013c8f` | `docs`: two stale counts in README, and the handoff |
-| `edc24b4` | `docs`: the accelerator row said "not assemblable" — it assembles |
-| `0216f91` | `docs`: the accelerator round-trip is stronger than §6.2 claimed |
-| `84d7046` | `docs(status)`: F36 — the §3.6 table names operands the word cannot carry |
-| `4f18f7d` | `docs(status)`: F36 grows — count's source and unit are undefined |
-| `9a9b193` | `feat(vm)`: the §3.6 accelerators now dispatch, and refuse per op |
-| `e3f3c15` | `docs(status)`: F36 implemented and verified; F37 recorded |
-| `af24bac` | `feat(isa)`: **Amendment 1.18** — 11 of 13 accelerators now execute |
-| `a5be79d` | `fix(x86-64)`: **F38** — REX.R/REX.B selected the wrong register for r8–r15 |
-| `c414be5` | `feat(examples)`: six-kernel cross-architecture suite + **F39** verdict fix |
-| `efa86bf` | `docs(status)`: F36 closed, F38 and F39 recorded |
+| `7b4e5b5` | `feat(contract)`: **amendment 1.20** names the layer that refuses a reserved opcode (**closes F37**), + **F40** recorded, + analyzer breadth |
+| `f3826f2` | `fix(rtl)`: the §3.6 recognition table matches the contract (**closes F40**) |
+| `69dbdca` | `docs(status)`: **F41** — the eighth example kernel was attempted twice and landed neither time |
+| `b081f6f` | `docs(status)`: F41 — correct the shift semantics |
 
-**The previous handoff's blocking item is done.** The dirty tree it described is
-committed, the 3 failing label tests pass, and the labels work is byte-verified.
-
-### Gates, all run on a cold cache at `fb3782e`
+### Gates, all run on a cold cache at `b081f6f`
 
 ```sh
 rm -rf .zig-cache && ~/.local/zig/zig build test --summary all
-  -> Build Summary: 53/53 steps succeeded; 978/978 tests passed   exit 0
+  -> Build Summary: 53/53 steps succeeded; 1016/1016 tests passed   exit 0
 
-~/.local/zig/zig build examples    -> exit 0, 6 kernels x 4 ISAs, all equivalent
-tools/accel_e2e.sh                 -> 10/10 checks passed (run by hand; see below)
-
-~/.local/zig/zig build crossarch   -> 8 rows, no !! warnings
+bash tests/mulout_e2e.sh           -> 6/6 checks passed        exit 0
+~/.local/zig/zig build examples    -> 64 "simulated" lines, 7 kernels x 4 ISAs
 ~/.local/zig/zig build audit       -> 9/9 enforcement points, all 9 rejected when set
 ~/.local/zig/zig build live-check  -> all 232 recorded facts still reproduce
-~/.local/zig/zig build bench       -> output unchanged (still the chunk=1 program)
-fuzzer (inside build test)         -> checked=11839 identical=11839, 0 mismatches
+~/.local/zig/zig build crossarch   -> 8 rows, no !! warnings
+Verilator core_tb                  -> 159/159 checks, exit 0
 ```
 
-The test count moved 570 -> 978 across this session: the labels work, the
-accelerator amendment (11 of 13 opcodes now execute), the seven-kernel example suite,
-the x86-64 REX fix, the static analyzer, and integer multiply on AArch64 and x86-64.
+The test count moved 1004 -> 1016. The `failed command:` lines that `zig build test
+--summary all` prints are **stderr from tests that legitimately exercise negative paths**
+(the analyzer's warnings, the examples suite's deliberate NOT-equivalent control at
+`src/examples.zig:1232`, the fuzzer's coverage line). They are not failures: the summary
+said 1016/1016 and exit 0, and there were **zero** `error:` lines. Confirmed by reading
+the log, not waved off.
 
-### The goal is re-created and ARMED
+### The goal
 
-`goal-ac15e6ba-696a-442f-822a-9c4270e7f8bf`, max 40 rounds. The objective treats the
-§3.6 accelerators as part of the **core** encoding contract rather than as optional
-extensions, which resolves the tension the previous handoff flagged. `get_goal`
-returns null after a session boundary, so it must be re-armed again next time.
+Re-created this session as `goal-3b894c6f-c09f-4bed-bcc8-aa9f16608544`, max 40 rounds,
+status active/armed. `get_goal` returns null after a session boundary, so it must be
+re-armed again next time. The objective treats the §3.6 accelerators as part of the
+**core** encoding contract, which resolves the tension the second handoff flagged.
 
 ---
 
-## 2. What was fixed, and two numbers that were wrong
+## 2. F37 is CLOSED — and the decoder was RIGHT all along
 
-### Labels (v1.18) — the blocking item
+F37 was filed as "the decoder does not reject a reserved accelerator byte" and left open
+as a decision with two defensible readings. **Only one survives**, and the deciding
+evidence was already in the tree:
 
-Three passes in `Assembler.assembleSource`: collect label → instruction index and
-reject duplicates, assemble while recording unresolved references in `pending`,
-then patch once every address is known. Labels resolve to `index * 8`; `branch`
-gets a PC-relative signed 28-bit delta **from the branch instruction itself**
-(§3.0.1), `jump`/`call` an absolute 48-bit address. `splitLabel` is shared by
-passes 1 and 2 so they cannot drift.
+- `src/disassembler.zig:552` is a passing, load-bearing test — *"a RESERVED accelerator
+  opcode round-trips as raw bytes, not as a neighbour"* — and it **requires**
+  `decode` to return `.ok` for a reserved byte. The disassembler reaches its `.raw`
+  fallback **only** through the `.accelerator` arm (`:109` into `accelerator`, `:117-125`).
+- §3.6's sentence has three clauses. Clause 1 ("decodes as an accelerator instruction with
+  an unrecognised operation") and clause 2 ("must round-trip as raw bytes") **both require
+  a successful decode**. Rejecting in the decoder contradicts the sentence it was meant to
+  satisfy.
 
-The test bug was exactly as the old handoff described. But **two inherited numbers
-were wrong**, and both are worth knowing because each could have been "fixed" by
-bending the product instead of the test:
+So **amendment 1.20** writes all three clauses out normatively and assigns each a layer:
+the decoder accepts (**must not** be changed to reject), the bytes round-trip as `.raw`,
+and the **simulator** refuses at execution — a fault, not a decode error. **No encoding
+changed: no bit moved and no opcode was added.**
 
-1. **`-16` → `-8`.** The failing test asserted `-16`. The encoder computes
-   `target_addr - branch_addr`, so a branch at address 8 targeting address 0 gives
-   `-8`. Setting it back to `-16` fails, so the assertion is load-bearing.
-2. **The by-hand numeric program did not exist and the first reconstruction
-   faulted.** The old handoff claimed the label program assembles to "the same 12
-   words as the numeric-offset equivalent" but never printed that program. The
-   first attempt to write it used branch delta `80` and `jump 24`, which sends the
-   exit past the 96-byte image and the back-edge to the setup word; the run dies
-   with *"the simulator refused an access at address 48"*. Correct values are a
-   branch delta of `48` and an absolute jump of `32`. Against those the images are
-   **byte-identical** (`cmp` clean) and both halt after 63 simulated instructions —
-   so the handoff's claim holds.
+**Part of F37 is retracted in place.** It filed the decoder's behaviour as the *F8 shape*
+("a rule enforced in one layer while another path reaches the same input ungoverned").
+That framing was wrong — no rule was bypassed, because §3.6 never required a decode error.
+The decoder is the governed path doing what clause 1 specifies; what was missing was a
+statement of **which layer owns the refusal**, and that ambiguity is what made the decoder
+look ungoverned.
 
-   That mistake was made by an agent that had just read the encoding rules. It is
-   the argument for labels existing, and it is recorded in `docs/STATUS.md` F35.
-
-### F32 is closed — and CLS64 now loses that comparison
-
-The CLS64 "scalar" row was the fused `stream.add` (0x40) eight times at
-`chunk = 1`, not a loop. v1.17's `load`/`store`/`branch` removed the reason that
-could not be fixed, so it is now a real 13-word per-element loop:
-
-```
-CLS64 scalar   11 -> 68 retired     88 -> 544 bytes     (now WORST of four)
-RISC-V scalar  55        (unchanged)
-AArch64 scalar 61        (unchanged)
-x86-64 scalar  60        (unchanged)
-CLS64 batch     4        (unchanged, 32 bytes)  <- still CLS64's real result
-```
-
-This is the honest result, not a regression: the old 11 measured a fused sequence
-under a scalar label. `docs/comparison.md` §7/§8 and `docs/fidelity.md` §3.4 have
-now been corrected in place (commit `875d65f`), with the superseded text marked
-rather than deleted. `benchmarks/bench.zig` was **not** changed: its scalar path is
-still `chunk = 1` `stream.add`s, its F32 comment already says so, and its 11 is
-still the literal output of `zig build bench`. Do not read that 11 as CLS64's
-scalar-loop result — it is a fused sequence at `chunk = 1`.
+Pinned in two places that must keep agreeing: `src/decoder.zig`'s *"F37 / amendment 1.20"*
+test plus a comment at the `.accelerator` arm, and `src/vm.zig`'s *"a RESERVED §3.6 byte
+still refuses DIFFERENTLY from a defined one"*. **Load-bearing, proven by mutation in a
+throwaway copy:** making the decoder return `.err` for `0x6F` makes the new test fail with
+`reached unreachable code` and the process abort.
 
 ---
 
-## 3. What remains
+## 3. F40 is CLOSED — the RTL was one opcode behind, and its testbench ASSERTED the wrong thing
 
-1. **The accelerators are DONE — 11 of 13 execute (Amendment 1.18, `af24bac`).**
-   Two remain refused, each for a reason that is a property of the operation rather
-   than a missing constant: `matrix.mul` (0x62) needs three addresses plus two orders
-   — five inputs for four fields — and `codec.decompress` (0x81) needs an `out.len`
-   bound that reusing `compress`'s 256-byte workspace cannot honestly supply. Closing
-   either needs a **second opcode**, which an amendment that does not change the
-   encoding may not add. See F36 in `docs/STATUS.md`.
+Amendment 1.19 added a fourteenth §3.6 opcode, `matrix.mulout` (0x65), to the contract and
+the simulator, and **touched nothing in `rtl/`**. The range `0x60`–`0x8F` is 48 bytes, so
+the RTL was 13 recognised / 35 reserved against the contract's **14 / 34**.
 
-   **An earlier draft of this handoff said this work was "read a register as an
-   address, derive the count, call the model, write back". That was wrong**, and the
-   error is kept visible because it is the natural assumption. What the contract
-   actually lacked, and what Amendment 1.18 supplied:
+Three sites disagreed, the third seriously:
 
-   | Missing rule | Affects |
-   |---|---|
-   | Where a matrix **dimension** comes from — no field carries one, and "dimension" appears in neither `docs/isa-encoding.md` nor the architecture spec | `0x60` `det`, `0x61` `invert`, `0x62` `mul` |
-   | Where `transform`'s 4×4 matrix `m` comes from (`count` IS defined; `m` is not) | `0x63` |
-   | Whether `rd` is an ADDRESS or a VALUE, so `out` cannot be located | `0x64` `identity` |
-   | Where an **output buffer** comes from — `rd`, `rs1` and `count` are all spoken for | `0x80` `compress`, `0x81` `decompress` |
-   | What `count = 0` means: §3.6:490 says "derive the count from the destination register" and never says what `rd` holds | all thirteen |
-   | Which **unit** `count` uses: fft says "element count", codec is byte-oriented, and a complex element is 16 bytes — a 16× difference | `0x70`–`0x73`, `0x80`–`0x83` |
+1. `rtl/pkg/celeris64_pkg.sv:152-155` had no `OP_MATRIX_MULOUT` constant.
+2. `rtl/accel.sv`'s exhaustive `unique case` listed 13 opcodes, and the comment above it
+   named **0x65 as its example of a reserved byte**.
+3. `rtl/tb/core_tb.sv:1040-1042` hard-coded `(b <= 8'h64) || ...`, and
+   `check_recognised_table()` **fails any byte in that list that decodes as recognised** —
+   so the testbench asserted 0x65 **must raise `unknown_op`**, the opposite of the contract.
 
-   So the next step for those two was **not** a VM change. It was a §3.6 amendment
-   stating, per operation, where each dimension and output buffer comes from and what
-   `count = 0` means — the same kind of amendment Amendment 1.1 already made for the
-   operand layout. **Amendment 1.18 made it** (`af24bac`), which is why 11 of the 13
-   now execute. The two that remain need a second opcode, not a further amendment.
+**Fixed by taking the decision F40 named:** the RTL recognises 0x65 and raises
+`not_implemented` like the other thirteen, staying **uniformly decode-only**. **No matrix
+datapath was built** — §3.6 calls these operations a software model and
+`rtl/CROSSCHECK.md` §4/§5.7 records that choice deliberately.
 
-   Two things that will bite anyone extending this: the models take
-   `[]f64`/`[]u8`/`[]Complex` views into a flat `[]u8` whose base alignment is **not**
-   guaranteed (`Vm.init` accepts any `[]u8`; tests use an align-1 allocator), so an
-   alignment check must precede any `@alignCast` — a misaligned cast panics. And the
-   VM must not allocate inside the execution loop (AGENTS.md §4.1).
+### The before-state is the interesting part, and it is the lesson of this session
 
-   The RTL half is **already done and is not part of this work.** `rtl/accel.sv`
-   decodes the range, flags a non-zero reserved field, and raises
-   `err_accel_not_impl_o` / `err_accel_unknown_o` with `result_valid_o` tied low.
-   That is the *correct* contract: §3.6 states these operations' behaviour "is a
-   software model", and `rtl/CROSSCHECK.md` §4/§5.7 records the RTL as deliberately
-   decode-only rather than fabricating a result. Do **not** build
-   matrix/FFT/codec datapaths in SystemVerilog to "complete" this.
+| | result |
+|---|---|
+| Before the fix | `ok §3.6 all 13 normative opcodes recognised (13), 35 reserved rejected` — **PASS, 159/159, exit 0** |
+| After the fix | `ok §3.6 all 14 normative opcodes recognised (14 observed), 34 reserved rejected` — **PASS, 159/159, exit 0** |
+| Mutant (0x65 removed from `accel.sv`) | `FAIL ... got 13 recognised and 35 reserved` — **failures=1, exit 1** |
 
-2. **F37 — a decision, not a patch.** `decoder.zig:469-485` accepts every byte in
-   `0x60`–`0x8F` as `.accelerator` with no registry lookup, so reserved-ness is not
-   established by the decoder even though §3.6 says such opcodes "decode as an
-   accelerator instruction with an unrecognised operation". Either teach the decoder
-   the lookup, or reword §3.6 to say the *simulator* refuses them. Both defensible;
-   picking one silently is not. Not a live defect today, because the VM does the
-   lookup correctly.
-3. **The example suite and analyzers are DONE; the instruction counter is DONE.**
-   `zig build examples` prints seven kernels × four ISAs with byte-for-byte
-   equivalence, and `src/analyzer.zig` ships one sound analyzer. What remains is
-   *breadth*, not mechanism: more examples, and more analyzers (five were rejected as
-   unsound — see the analyzer module header for the correct programs that break each).
-   **CLS64 loses all seven kernels**, and loses worst of four on the largest
-   (`matmul_8x8`: 11044 retired against x86-64's 4838). That is the intended result,
-   not a tuning failure. Do not "fix" it by changing the programs.
-4. **`cap.*`** stays decode-only. §3.5 v1.12 explains why: the register pair has
-   no `length` bit position, so a capability cannot be reconstructed. Needs a §6
-   redesign, not a bug fix. Do not "fix" it by inventing a field layout.
+**The testbench did not fail before the fix — it PASSED while contradicting the contract**,
+because it encoded the old table, so the check written to catch exactly this could not see
+it. That is the **F31 shape**, and it is strictly harder to notice than a red test. The
+mutant run proves the corrected table is load-bearing.
+
+**A second defect found and fixed in the same task:** the closing `$display` printed `ok`
+and the **expected** count **unconditionally**, so under mutation it emitted a passing line
+beside the failure. It now counts what the RTL **actually** reports, separately from what
+the test expects. The mutant output above is that change working.
+
+**This was the second time this session that a green gate hid a disagreement** (F37's
+decoder was the first). **Both were found by asking what a passing check actually
+*asserts*, not by watching for failure.** Expect the same from `rtl/` next time.
 
 ---
 
-## 4. Environment facts that cost time
+## 4. F41 — the example breadth item is NOT delivered, and that is an honest result
+
+`src/examples.zig` is **byte-identical to `b081f6f`**. The suite still passes: 7 kernels x
+4 ISAs, `zig build examples` exit 0. **No eighth kernel landed.** Two attempts, both
+stopped by a teammate, **both correctly**: each wrote a kernel whose CLS64 program did not
+compute what the other three did, caught it against the reference, and reverted rather than
+shipping it.
+
+The full findings are in `docs/STATUS.md` F41 and on shared **task-2**. The essentials:
+
+- **CLS64 needs MORE instructions than the other three for the same operation, and cutting
+  them does not make the program faster — it makes it WRONG, silently**, with no assembler
+  or decoder complaint. The second draft computed `x << 3` where the other three computed
+  `rotl(x, 3)`; it assembled, ran, and produced a plausible count. Caught only by reference
+  comparison, at **64 of 64 words mismatched**.
+- **The verified CLS64 rotate shape** is `shl -> store to scratch -> shr 32 -> load
+  original -> or -> store back`. The scratch round trip is **load-bearing**; removing it —
+  the "obvious optimisation" — silently stops the program being a rotate.
+- **Why, precisely** (`src/vm.zig:1058-1059`): `shl`/`shr` are **full-width and
+  saturating** — computed over all 64 bits, yielding **zero** at a count of 64 or more,
+  *not* masking the count to six bits the way x86-64's `shl` does. Truncation happens only
+  on the **write** (`writeWidth`, `src/vm.zig:1066`), while x86-64's `imulq $8` **keeps**
+  the high bits. So the extra instructions are a **correctness requirement**.
+- **Measured** via this repository's own decoders: x86-64 454 retired, RISC-V 776, AArch64
+  710. CLS64 will lose it; declare `.expected_loss`.
+- **Two traps:** (a) **`llvm-mc` is an oracle for the three REAL ISAs ONLY** — it does not
+  validate against this repository's subsets (an AArch64 `LSR` immediate `llvm-mc` accepts
+  is not in the A64 subset here; the shift exists only as an ADD/SUB field, 0x8B/0xCB).
+  Check **every** word against `src/isa_*.zig`. (b) A RISC-V branch label resolved as
+  `j.eq .+8`.
+- **A dead end, do not retry:** a data-driven table-walk kernel needing a "dead destination
+  register" primitive. x86-64's decoder has **no shift handler at all** (falls to
+  `UnknownOpcode`) and AArch64 has no standalone LSL.
+- **Procedural lesson:** both attempts burned their whole budget on **generation plumbing**
+  (three scratch toolchains) and never reached measurement. Next attempt: pick a kernel
+  needing **no calibration or fixed-point argument**, **hand-write** the four programs
+  rather than generating them, and verify all four through the decoders **before**
+  measuring.
+
+---
+
+## 5. Analyzer breadth — delivered and independently verified
+
+Three new sound rules in `src/analyzer.zig`: `select` with the same register in both arms,
+`field.extract` at offset 0 width 64, `field.insert` at offset 0 width 64. Each is decided
+by the instruction word alone, which is the module's soundness rule.
+
+**Seven rejected rules** are recorded in the module header with the correct program that
+breaks each — including `matmul_8x8`'s legitimate repeated arithmetic, `p1_zeroext`'s
+deliberate write chain, and `tests/mulout_e2e.sh`'s intentional `jump 400000` fault trap.
+**A rejected rule honestly documented is worth as much as an accepted one here.**
+
+`src/diagnostics.zig` grew **50 lines, additive only** — verified mechanically as 50
+insertions / 0 deletions, with `git diff -U0 | grep '^-[^-]'` empty. New constructors live
+beside the existing ones; **no existing message text was touched**, which matters because
+tests quote those strings and `live-check` replays 232 recorded facts.
+
+**Load-bearing, verified by the Lead by mutation in a throwaway copy:** inverting the
+`select` rule failed **three** tests, including the repo-wide corpus test — proving that
+test really exercises the shipped programs rather than only fixtures.
+
+---
+
+## 6. What remains
+
+1. **The example suite's eighth kernel (F41).** Not blocked by any defect; blocked by
+   implementation cost. Follow §4 above and do not restart from zero.
+2. **More analyzers** — breadth, not mechanism. The module header lists what is unsound and
+   why; read it before proposing anything.
+3. **The accelerators.** 11 of 13 execute. `matrix.mul` (0x62) and `codec.decompress`
+   (0x81) are **refused by design**, each for a stated reason that is a property of the
+   operation, not a missing constant (F36 in `docs/STATUS.md`). `0x65 matrix.mulout` was
+   added by 1.19 and **executes**. **Do not "complete" the refusal by inventing a
+   convention.**
+4. **`cap.*`** stays decode-only. §3.5 v1.12 explains why: the register pair has no
+   `length` bit position, so a capability cannot be reconstructed. Needs a §6 redesign, not
+   a bug fix.
+5. **CLS64 loses every example kernel**, and loses worst of four on `matmul_8x8` (11044
+   against x86-64's 4838). **That is the intended result.** Do not "fix" it by changing the
+   programs.
+
+---
+
+## 7. Environment facts that cost time
 
 - Zig **0.17.1** at `~/.local/zig/zig`. No system `zig`.
 - Verilator **5.49** at `~/.local/verilator/bin/verilator`.
-- LLVM 20 at `/usr/lib/llvm-20/bin/` — use `llvm-mc -triple=<isa> -show-encoding`
-  as an assembler oracle. **There is no LLVM backend for CLS64**, so CLS64's own
-  encodings can only be checked against this repo's decoder. That is
-  self-consistency, not independent verification; say so when quoting them.
-- **Test counts are a measurement, not a calculation.** `zig build test` on a warm
-  cache reports a stale count. Always `rm -rf .zig-cache` before quoting a number.
-- `zig build test --summary all` may print a `failed command:` line from the
-  *build runner* while still reporting `49/49 steps succeeded`. Trust the summary
-  line and the exit code, not that line.
-- Verilator PCH bug: a `--binary` build floods ~8 GB because GCC gets
-  `Vstream_tb__pch.h.fast` as a bare positional argument. Fix with
-  `-MAKEFLAGS "VK_PCH_I_FAST= VK_PCH_I_SLOW="`. Never redirect a Verilator log.
-- Two encoders exist (`assembler.zig` `Instruction.word()` and `decoder.zig`
-  `encode()`); the fuzzer checks they agree. Keep it that way.
-- **A stale CLI binary reads exactly like a real result.** `zig-out/bin/celeris64`
-  is only rebuilt by `zig build`. Verifying a `src/` change by running the CLI
-  without rebuilding reports the PREVIOUS code, and nothing in `git status` or a
-  clean `git diff` reveals it. This produced a false reading this session that
-  nearly went into `docs/STATUS.md` as evidence. Rebuild before believing a CLI
-  observation you intend to rely on.
-- `zig fmt` was **not** clean on the baseline `src/vm.zig`; a change that rewraps
-  those lines is not gratuitous churn.
+- **`zig fmt` is NOT usable as a gate on this tree.** It flags `src/decoder.zig` and
+  `src/vm.zig`, but **both were already flagged at HEAD** — and this toolchain's formatter
+  wants a **semantic rewrite** (`@enumFromInt` → `@fromBackingInt`), not whitespace.
+  Running it produces large unrelated churn. Verify with `git stash` that a file was
+  already unformatted before blaming your change. **Do not run bare `zig fmt` on the tree.**
+- `zig build test --summary all` prints `failed command:` lines for tests that write to
+  stderr. Trust the **summary line and the exit code**, and confirm with
+  `grep -c 'error:'` on the captured log.
+- **A stale CLI binary reads exactly like a real result.** `zig-out/bin/celeris64` is only
+  refreshed by `zig build`. `tests/mulout_e2e.sh` already refuses to run when the binary is
+  older than `src/vm.zig` — keep that guard.
+- **`rm -rf .zig-cache` while another build is running corrupts the run.** This produced a
+  spurious batch of `NOT equivalent` failures this session. `tests/mulout_e2e.sh` runs
+  `zig build` itself, so it must not race a cold wipe. Serialise, or check
+  `pgrep -af 'zig build'` first.
+- Verilator: use a **fresh `-o` path** and check the build's exit status before running —
+  `rtl/CROSSCHECK.md` §2.3 records that a failed compile leaves the previous binary in
+  place, so a "new" simulator can report old results. Build the testbench with
+  `-Mdir <fresh dir>`.
+- Two encoders exist (`assembler.zig` `Instruction.word()` and `decoder.zig` `encode()`);
+  the fuzzer checks they agree. Keep it that way.
 
-### Three traps, all confirmed this session
+### Three traps, still confirmed
 
-- **`assembleSource` moves its arena into the returned `Program`.** `Program.arena`
-  is a *value copy* sharing one node list, so `prog.deinit()` **and**
-  `assembler.deinit()` frees the same nodes twice — a double free on the **success**
-  path that aborts. On the failure path nothing was handed over, so the assembler
-  must free.
-- **Returning `prog.words` as a slice is unsafe on its own.** It is the live
-  `ArrayList` buffer, and Zig 0.17's `ArenaAllocator` can *move* that allocation
-  when it grows the same node; a stale slice then reads `0xAAAA…` poison. "The
-  words are arena-owned" does not make a slice safe. Test helpers return `Program`.
-- **A `Diagnostic` outlives the function that builds it.** Storing a rendered
-  string in a function-local buffer and returning it in `.detail` or `.mnemonic`
-  gives an empty or corrupt field at render time, silently. This was attempted and
-  caught by an existing test; the value must point at storage that outlives the
-  call. Related: `main.zig:379` renders into a fixed `[1024]u8` and discards
-  overflow with `catch {}`, so an over-long diagnostic is truncated mid-word with
-  no indication. Keep a rendered fault under ~900 bytes.
+- **`assembleSource` moves its arena into the returned `Program`.** `prog.deinit()` **and**
+  `assembler.deinit()` frees the same nodes twice — a double free on the **success** path.
+- **Returning `prog.words` as a slice is unsafe on its own** — the arena can move it, and a
+  stale slice reads `0xAAAA…` poison. Test helpers return `Program`.
+- **A `Diagnostic` outlives the function that builds it.** A rendered string in a
+  function-local buffer gives an empty or corrupt field, silently.
 
 ---
 
-## 5. Documentation state
-
-All published tables were reconciled with the code this session. The method used
-throughout: the superseded text is **marked in place**, not deleted, so a reader who
-saw the old number can find out what happened to it.
-
-- `docs/comparison.md` §8 table — CLS64 scalar `11/88` → `68/544`, with RISC-V's
-  `4.00` now marked as the best density on that row.
-- `docs/comparison.md` §7 — F32's finding kept as the historical record. §7.4 is
-  retitled ("could not be written *at the time*"), §7.5's first bullet is marked
-  superseded, and §7.6 records the closure and the rewritten may-say list.
-- `docs/comparison.md` §3.1 — the `11` is labelled "as found, pre-v1.18".
-- `docs/fidelity.md` — the F32 block's claim that this "cannot be corrected without
-  an ISA change" is corrected; the `zig build bench` output block is left alone
-  because it is still that command's literal output (re-ran it to confirm rather
-  than assume).
-- `docs/STATUS.md` — F32 closed, F35 (labels) recorded.
-- `README.md` was checked: it does not quote the crossarch table, so it needed no
-  change. It does say "11,592 checked" for the fuzzer, which is a different number
-  (round-trip fuzz cases) and is **stale** — the current run is 11,839. Low stakes,
-  but it is a stale number in a public file; fix it if you touch that section.
-
----
-
-## 6. Honesty constraints this repository enforces
+## 8. Honesty constraints this repository enforces
 
 Load-bearing. Do not relax them.
 
 - Every benchmark line contains the word **"simulated"**.
-- **No clock frequency, timing figure, area figure or silicon performance claim
-  appears anywhere.** `docs/fidelity.md` calls such a claim a bug.
-  `src/isaharness.zig` has no field for a timing quantity and a test — "the harness
-  reports no timing quantity of any kind" — fails if one is added.
-- Models are labelled as models; RTL is synthesised but never timing-closed and
-  never on silicon.
-- A finding that turns out to be wrong is **retracted in place**, not deleted.
-  This session retracted its own draft attribution in F35 for exactly this reason.
+- **No clock frequency, timing figure, area figure or silicon performance claim appears
+  anywhere.** `src/isaharness.zig` has no field for a timing quantity and a test fails if
+  one is added.
+- Models are labelled as models; RTL is synthesised but **never timing-closed and never on
+  silicon**.
+- A finding that turns out to be wrong is **retracted in place**, not deleted. This session
+  retracted part of F37 for exactly this reason, and corrected F41's own shift-semantics
+  note rather than quietly rewriting it.
 - Mutation tests run in **throwaway copies**, never on the shared tree.
-- **A comparison must not favour the subject.** When the honest fix makes CLS64
-  look worse, report the worse number. That happened here (11 → 68) and is the
-  correct outcome.
+- **A comparison must not favour the subject.** When the honest fix makes CLS64 look worse,
+  report the worse number.
+- **A green test that asserts the wrong thing is worse than a red one.** This session found
+  two (F37's decoder, F40's RTL table). Ask what a passing check *asserts*.
 
 ---
 
-## 7. Goal in flight
+## 9. Goal in flight
 
 ```
 Finish the CLS64 core ISA (no extensions/accelerators), then build a
@@ -288,12 +283,7 @@ efficiency per assembly program. Every example must be verified equivalent
 across all four ISAs and must not favour CLS64.
 ```
 
-The old handoff recorded goal id `goal-bcd934e2-c9da-4d29-a68d-3d314631667c`.
-**No goal is active in this session** — `get_goal` returned null, so the goal was
-not carried across. If the objective above is to continue, it must be re-created.
-
-Note the tension worth resolving explicitly: the goal says "no
-extensions/accelerators", while the old handoff's item 3 lists wiring the
-accelerators as the next core gap. These are compatible if the accelerators are
-treated as part of the core encoding contract (§3.6) rather than as optional
-extensions — but that reading should be confirmed, not assumed.
+**No goal is active in this session's successor** — `get_goal` returns null across a
+session boundary, so it must be re-created. The id used here was
+`goal-3b894c6f-c09f-4bed-bcc8-aa9f16608544` (max 40 rounds). The accelerators are treated
+as part of the core encoding contract (§3.6) rather than as optional extensions.
