@@ -1685,3 +1685,91 @@ plain-language diagnostic that names the missing rule, and to keep a *reserved*
 opcode byte (`0x60`–`0x8F` with no table row) faulting differently from a
 *defined but unexecutable* one. The two are different findings and should not read
 the same.
+
+### F36 implementation status (v1.18) — refused, and verified
+
+The refusal is implemented and verified. All thirteen §3.6 opcodes now reach
+`refuseAccelerator` in `src/vm.zig` instead of the generic `execute` else arm; **none
+executes.** Reserved bytes reach the same function and read differently, so
+"defined but unexecutable" and "not in the table at all" are distinguishable by a
+reader. Verified in the CLI, not only in-process — the defined case names the
+operation (`the instruction "matrix.det"`) and the reserved case does not.
+
+Properties asserted by test, because a refusal that half-executes is worse than one
+that crashes: the refused word does **not** retire, PC does **not** advance past it,
+and no register is written. `cap.check` immediately after an accelerator word is
+unaffected, so the arm does not disturb its neighbours.
+
+**Two defects were found in review and fixed, both invisible to the unit tests and
+both in the user-visible path** — which is the argument for running the CLI rather
+than trusting a green suite:
+
+1. **The refusal was silently truncated.** It rendered to exactly 1025 bytes and was
+   cut mid-word at `docs/`. `main.zig:379` renders into a fixed `[1024]u8` and
+   discards the overflow with `catch {}`, so the reader received a sentence that
+   looked complete and was not. Fixed by tightening the prose to 723 bytes; a test
+   now renders into a literal `[1024]u8` and requires a trailing period. Confirmed
+   load-bearing by re-injecting the defect in a throwaway copy — the guard fails.
+2. **The message said "which is not valid here".** That is the renderer's
+   malformed-*operand* clause. Nothing was malformed: `matrix.det R1, R2` is a
+   well-formed instruction whose semantics the contract declines to define. Telling
+   the reader their operands are invalid sends them to fix an instruction that is
+   not broken.
+
+**A third defect was found and rejected before it shipped.** An attempt to improve
+the reserved-byte phrasing (so it read as a description rather than as a mnemonic)
+stored the new text in a function-local buffer via `bufPrint` and returned it inside
+the `Diagnostic`, which outlives that frame. The reserved case rendered as
+`the instruction ""` — an empty name, silently. Caught by the existing test, reverted,
+and the original phrasing kept; the cosmetic gain was not worth a use-after-scope.
+Recorded because it is the same silent-loss class as defect 1, committed by the same
+review that found defect 1.
+
+---
+
+## F37: the decoder does not reject a reserved accelerator byte (F8 shape, again)
+
+**Found** while implementing F36, by the teammate wiring it. **Status: open.** Not
+fixed, because `src/decoder.zig` is outside that change's scope.
+
+`docs/isa-encoding.md` §3.6 says: *"An opcode in `0x60`–`0x8F` that is not in this
+table is **reserved**: it decodes as an accelerator instruction with an unrecognised
+operation, must round-trip as raw bytes, and must not be silently reinterpreted as a
+neighbouring operation."*
+
+`decoder.zig:469-485` accepts **every** byte in `0x60`–`0x8F` as `.accelerator` with
+no lookup in the §3.6 registry; the only rejection there is a non-zero
+`reserved[39:32]`. So the reserved-ness of an opcode is not established by the
+decoder at all. Reproduced: `.raw 111, 0, 0, 0` assembles (111 = `0x6F`),
+disassembles back to the same text, and `decode` returns `.ok` for it.
+
+This is the **F8 shape** — a rule enforced in one layer while another path reaches
+the same input ungoverned — and it is the same shape as F24/F27, where a rule the
+assembler enforced was unenforced on the `run-bin` path. It is not currently a live
+defect, because the VM's `refuseAccelerator` does the registry lookup and refuses
+reserved bytes correctly; the distinction is made, just one layer later than the
+contract's wording implies. It becomes live if any future consumer of
+`decoder.decode` treats `.accelerator` as meaning "a defined operation".
+
+**What closing it needs:** a decision, not a patch — either the decoder gains the
+registry lookup and returns `.err` for a reserved byte (making the contract's
+sentence literally true of the decoder), or §3.6 is reworded to say the *simulator*
+must refuse it, which is what actually happens today. The second is cheaper and
+matches the code; the first is stricter and matches the existing sentence. Both are
+defensible; picking one silently is not.
+
+### A verification trap hit while recording this
+
+Verifying F37 by hand produced a **false reading** worth recording, because it nearly
+went into this file as evidence. Three reserved bytes were run through the CLI and
+all three reported the *improved* phrasing `"opcode 0x6f, which the §3.6 table does
+not list"` — text that was **not in the source**. The source had been reverted; the
+`zig-out/bin/celeris64` binary had not been rebuilt, so the CLI was running a
+discarded experiment. After `zig build`, the same three inputs reported
+`"an accelerator operation the encoding table does not list"`.
+
+The lesson is the one the previous session already recorded about test counts: **a
+stale artifact reads exactly like a real result.** `git status` was clean for
+`src/vm.zig` and the source was correct, so no file diff would have revealed it.
+Rebuild before believing a CLI observation, especially when that observation is
+being used as evidence in a document.
