@@ -18,7 +18,7 @@ and apt-installed RTL tools are out of reach.
 ## Verified working
 
 `~/.local/zig/zig build` -> exit 0.
-`~/.local/zig/zig build test` -> **33/33 steps succeeded, 260/260 tests passed, exit 0**.
+`~/.local/zig/zig build test` -> **39/39 steps succeeded, 452/452 tests passed, exit 0**.
 `~/.local/zig/zig build bench` -> exit 0.
 
 | Check | Command | Result |
@@ -197,7 +197,7 @@ Current, verified state. Superseded claims are removed rather than left to misle
 ```sh
 rm -rf .zig-cache zig-out
 ~/.local/zig/zig build          # exit 0
-~/.local/zig/zig build test     # 33/33 steps, 260/260 tests, exit 0
+~/.local/zig/zig build test     # 39/39 steps, 452/452 tests, exit 0
 ~/.local/zig/zig build bench    # exit 0
 ```
 
@@ -664,24 +664,36 @@ The lesson is the same one this project keeps teaching: a dispatch is not a deli
 task on the board is not work in progress. The only thing that established the gap was
 executing the check again on the current tree.
 
-### Session close: 442/442, all gates green
-
+### Session close: 452/452, all gates green
 Final state, every figure independently re-derived by the Lead on a clean-room tree
 (`rm -rf .zig-cache zig-out`) and summed from the individual roots rather than read off a
-headline:
+headline. The count has moved three times as work landed — **442**, then **444** (F17's two
+tests), then **452** (the round-trip fuzzer's eight) — and each figure was correct for the tree
+it describes.
 
 ```
 zig build        -> 0
-zig build test   -> 37/37 steps, 442/442 tests, exit 0   (18 roots, summed = 442)
+zig build test   -> 39/39 steps, 452/452 tests, exit 0   (20 roots, summed = 452)
 zig build bench  -> 0   (every line says "simulated")
 zig build audit  -> 0   (9/9 reserved fields rejected when explicitly set; 1 exemption)
 zig build live-check -> 0   (232 recorded facts re-derived from the current binary)
 verilator --lint-only -Wall --top-module core <whole rtl/> -> 0 warnings
-rtl/tb/alu_tb.sv    -> 80/80
-rtl/tb/stream_tb.sv -> 314/314, atomicity holds
+rtl/tb/alu_tb.sv    -> 80/80      (re-measured this round)
+rtl/tb/stream_tb.sv -> 348/348, atomicity holds   (was 314; see F31 below)
+rtl/tb/core_tb.sv   -> 159/159   (re-measured this round)
 rtl/CROSSCHECK.md   -> 4/4 programs agree with the Zig simulator
 grep -rn MUTANT rtl/ -> nothing
 ```
+
+> **F31 count correction, measured.** The `314/314` line above was an arithmetic
+> carried across sessions. Both vacuous checks F31 removed were *counting* toward
+> it, so the figure was inflated by assertions that could not fail. After the fix,
+> built and run on this host: **`stream_tb` 348 assertions, 0 failures, exit 0**;
+> `alu_tb` 80/80; `core_tb` 159/159. The rise from 314 to 348 is the point — the
+> two tautologies were replaced by four real assertions (a two-run signed-vs-
+> unsigned status comparison, and three consequences of an oversized chunk). The
+> replacement was mutation-tested: forcing the checked signal to `1'b0` produces
+> `FAIL: §3.4 oversized chunk reports chunk_too_large: got 0 expected 1` and exit 1.
 
 **Superseded (kept for the record).** This session closed twice earlier. The first read
 **375/375** at contract v1.10; the second read **418/418** after task-19/20/23/24. Both
@@ -864,3 +876,261 @@ this repository connects a change to the documents that deny it. F17 was caught 
 disagreed and a human noticed; F18 because running a linter is not running a synthesizer and a
 human noticed. Both were noticed by accident. There is no mechanism here that would have caught
 either, and "we will remember to re-read the docs" is not a mechanism.
+
+---
+
+## F19–F30: twelve defects found by a differential fuzzer
+
+F16–F18 were found by accident — two numbers disagreed, or a human re-read a sentence. **F19–F30
+were found by running a program.** `tests/roundtrip_fuzz.zig` generates pseudo-random CLS64 words,
+drives them through the disassembler and back through the assembler, and requires the original
+word back. That is the contract's own `asm -> dis -> asm` byte-identity claim, tested on 20,000
+generated words instead of on the handful of fixtures written to satisfy it.
+
+**The fuzzer found twelve defects in its first hour.** Each is recorded below with a word that
+reproduces it. Every one was verified by hand at the command line before being written down.
+
+### How the fuzzer itself was wrong three times
+
+Recorded first, because a fuzzer that lies is worse than no fuzzer.
+
+1. **The first generator was nearly useless.** It OR'd a random 48-bit payload under a plausible
+   opcode byte, so **19,458 of 20,000 words were rejected** by the decoder as having reserved bits
+   set. Only **8** reached the encoders. It was a reject-path test wearing a round-trip label. The
+   generator now builds each class from its own §3 layout, and the suite prints its coverage — now
+   **11,592 words checked, 11,592 identical** — so this cannot silently regress.
+
+2. **The first self-check could not fail.** `isSourceExpressible` filtered the words to test, and a
+   *separate, duplicated* block counted why each was filtered. The two drifted within minutes: the
+   counter mislabelled a `select`-with-`PC` word the predicate had already excluded, and reported it
+   as "unexpected". Both now call one classifier, `unexpressibleReason`, so they cannot disagree.
+
+3. **A test that passed under mutation.** See F30's entry — the assembler has its own encoder, so a
+   mutation in `decoder.encode` was invisible to a round-trip that never calls it. Fixed by adding
+   an encoder-agreement test, which was itself first written against fixtures containing **no
+   `field.*` instruction at all**, and therefore missed the same mutation a second time. Only after
+   driving it from the generator did it fire.
+
+### The twelve findings
+
+Each entry names the word, what the tools do, and which is wrong.
+
+| ID | Class | Word | Symptom |
+|---|---|---|---|
+| **F19** | contract gap | `0x43BAB89E3BCCB87F` | `stream.setp` decodes `rs1` and `operand[47:40]`, names neither, and §3.4 requires neither to be zero |
+| **F20** | **code bug** | `0x70275000E82AE96C` | `.raw` omits `rd`/`rs1`; `0x70275000E82AE96C` → `0x70005000E82AE96C` |
+| **F21** | **code bug** | `0x1012300000000005` | ALU immediate form carries a live `rs2`; two distinct words render identically |
+| **F22** | **code bug** | `0x1912000000000005` | `mov` ignores `rs1`, which the encoder still writes |
+| **F23** | **code bug** | `0x91120000000000F1` | `thread.join`/`yield` write `rd`/`rs1`, name neither |
+| **F24** | code/contract | `0x30512D3D00000000` | `field.*` range unenforced in the decoder; `dis` emits text `asm` rejects |
+| **F25** | contract gap | `0x304C3101D0000000` | `field.extract` carries `src2`, which §3.3 assigns to `insert` only |
+| **F26** | **code bug** | `0x42A4E724BC300000` | `stream.fill` **renders** `rs2` but the assembler never **parses** it |
+| **F27** | contract contradiction | `0x124E02000995E499` | §4's table says `PC` is readable; its next paragraph says it is an error |
+| **F28** | code/contract | `0x5075000000000000` | `cap.*` odd pair register; decoder accepts what §3.5 forbids |
+| **F29** | contract gap | `0x201D830000000000` | `compare` has no layout for `operand[47:36]`, which is silently dropped |
+| **F30** | **code bug** | `0x20D1600000000800` | §3.2.1 reserves `compare`'s `[35:0]`; routed through the ALU check, `[27:0]` is enforced by nothing |
+
+### The dominant pattern: a field written but never named
+
+**F20, F21, F22, F23, F25, F26 and F29 are one defect wearing seven hats.** The encoder writes a
+field; the renderer does not print it; the assembler re-creates it as zero. A byte-identical
+round-trip is therefore impossible, and the loss is **silent** — exit 0, no diagnostic.
+
+The clearest case is F21, because it does not merely drop a bit, it **rewrites one valid word into
+a different valid word**:
+
+```
+0x1012300000000005   add R1, R2, 3, 5     renders "add R1, R2, 5"
+0x1012000000000005   add R1, R2, 5        renders "add R1, R2, 5"
+```
+
+Two words, one text. Re-assembling that text always yields the second. §3.1 says "if `imm28 != 0`,
+the instruction is immediate-form and `rs2` is ignored" — but *ignored on read* is not *free to
+differ on write*. The disassembler comments that it prints only one form "because printing both
+would produce text that re-assembles to a different word": it defends the rule on the read side
+while the write side breaks it.
+
+F26 is the sharpest, because the two tools **disagree in public**: `stream.fill R10.b, [R4]+468156, PC`
+assembles with `PC` silently discarded, and disassembles back as `, R0` — a different register,
+exit 0 throughout.
+
+### The second pattern: the decoder accepting what the assembler refuses
+
+**F24, F27, F28 and F30 share a shape**, and it is the F8 shape this repository has met twice
+before: *the assembler is not the only entry point.* `run-bin` loads a blob and never consults the
+assembler.
+
+- **F27 is the worst of them, and it is a contract self-contradiction.** §4's index table lists
+  `PC` (14) as "**readable**". The paragraph immediately below says `PC` in `rs1`/`rs2` "**is a
+  diagnostic error**". The two cannot both hold. The decoder follows the table and accepts;
+  the assembler follows the paragraph and refuses; **`run-bin` executes it**. So:
+
+  ```
+  $ celeris64 dis w.bin        -> mul R4.w, PC, -107617127     exit 0
+  $ celeris64 asm w.dis        -> refused, exit 1
+  $ celeris64 run-bin w.bin    -> halted after 2 instructions, exit 0
+  ```
+
+  The disassembler emits text it cannot itself re-assemble. This is the same defect shape as F4:
+  a table contradicting its own paragraph.
+
+- **F30 is F6 repeating for a different opcode.** §3.2.1 reserves `compare`'s `operand[35:0]` and
+  requires rejection. `0x20` is routed through `aluOrErr`, which enforces the **ALU** rule on
+  `[39:28]`. So `[27:0]` is checked by neither rule: `0x20D1600000000800` decodes as
+  `compare R1, 2048 -> LR`, and the `0x800` vanishes on re-assembly. `decoder.zig`'s own comment
+  for F6 says "the RTL had implemented it while the decoder had not" — the decoder is still
+  behind, now for `compare`.
+
+- **F24** is worth separating from F27 because execution is *safe*: `vm.zig` and the assembler both
+  enforce `offset + width <= 64`, so a bad word faults at run time. Only the **disassembler** is
+  wrong — it renders a word the rest of the system refuses.
+
+### A structural finding: there are two encoders
+
+`decoder.encode` has **no production caller**. The assembler builds words itself in
+`Instruction.word()`, and `decoder.encode` is reached only from decoder tests. The round-trip
+therefore exercises the assembler's encoder and *never* the decoder's.
+
+This is how F30 stayed invisible from both sides at once: `Instruction.word()`'s
+`.compare_select` branch encodes `compare` with the **ALU** layout, and `decoder.encode` routes to
+`encodeAlu` too. They agree with each other perfectly, and both contradict §3.2.1.
+
+The duplication also hid a mutation. Deleting `src2` from `decoder.encode`'s `encodeField` broke
+**nothing** — the fuzzer could not see it, and my first encoder-agreement test could not either,
+because the four committed cross-check programs contain no `field.*` instruction at all. Two
+encoders that must agree need a test that says so, driven from a generator rather than from
+fixtures written for some other purpose. That test now exists and is proven to fire.
+
+### Mutation proof
+
+Both halves are proven to catch a real fault, in a throwaway copy, never on the shared tree:
+
+| Mutation | Result |
+|---|---|
+| `assembler.zig`: `field_width +% 1` | `ROUND-TRIP FAILURE at iteration 75` — word, render and outcome named |
+| `decoder.zig`: `encodeField` drops `src2` | `generated 0x310B023730000000: decoder.encode() gives 0x310B023700000000`, exit 1 |
+
+The second survived the fixtures-only version of the test. That failure is why the generator
+drives it.
+
+### What the fuzzer does NOT cover
+
+- **Semantics.** It compares *encodings*, not results. It cannot see a VM that adds when it should
+  subtract. The RTL cross-check in `rtl/CROSSCHECK.md` compares behaviour, on four programs.
+- **The RTL.** Nothing here touches `rtl/`.
+- **The holes it found.** F19–F30 are excluded from the round-trip set by `unexpressibleReason`,
+  which is honest only because the exclusion is counted and asserted non-zero. **A green suite does
+  not mean these are fixed** — it means they are recorded. Every excluded arm names its defect ID
+  in the source.
+- **Reserved opcodes outside `0x60`–`0x8F`**, and `cap.*`/`thread.*` execution.
+
+### The lesson, and the mechanism
+
+F16–F18 were one defect — a claim true when written, falsified later, never re-read — and the
+conclusion recorded then was that nothing in this repository connects a change to the documents
+that deny it, and that "we will remember to re-read the docs" is not a mechanism.
+
+F19–F30 supply the mechanism. **A fuzzer is a machine for re-reading.** It does not know which
+sentence is stale; it only knows that two implementations must agree, and it says so when they do
+not. Twelve defects, none of which any existing test could see, all of them found by a program that
+was written in one sitting and is now part of `zig build test`.
+
+Twelve of the twelve were found by *running* code, never by reading it.
+
+---
+
+## F31: two RTL assertions that could never fail
+
+Found by reading `rtl/tb/stream_tb.sv` while re-running the testbenches, not by any tool. Both
+were counted in the `314/314` figure that has been quoted as evidence of RTL coverage since
+task-14.
+
+```systemverilog
+// line 654, after the signed/unsigned compare split:
+// "And they must not be the same value."
+check1 ("§3.2.1 signed view != unsigned view", 1'b1, 1'b1);
+
+// line 827:
+check1("§3.4 oversized chunk reports chunk_too_large", se_chunk_too_large || 1'b1, 1'b1);
+```
+
+`1'b1` equals `1'b1`, and `anything || 1'b1` is always `1'b1`. **Neither check can fail**, whatever
+the DUT does. They are not weak assertions; they are assertions in name only, and they inflated an
+assertion count that `rtl/CROSSCHECK.md` §5.6 cites as proof the oversized-chunk refusal works:
+
+> "A larger chunk is refused loudly on `chunk_too_large_o`; it is **never** silently truncated."
+
+That sentence was supported by a tautology. The RTL may well behave exactly as described — but
+until now nothing in this repository had tested it. **This is the same defect class as the F17
+benchmark whose assertions were all relational**: a test that cannot fail is worse than no test,
+because it is counted as evidence.
+
+Both are now driven for real:
+
+- The signed/unsigned check captures the two `su_status` values from two actual runs and compares
+  them, so a collapse into one status enum fails.
+- The oversized-chunk check issues `chunk = 20'hFFFFF` and asserts **three** independent things:
+  `se_chunk_too_large` is high, **no byte of memory changed**, and the pointer did not move. The
+  middle one is the claim §5.6 actually makes ("never silently truncated"), and it had never been
+  asserted at all.
+
+**Honest note on the counts.** The `314` figure was reached before this fix and included these two
+vacuous checks. The estimate written here at the time was `314 − 2 + 4 = 316`. **That estimate was
+wrong: the measured value is 348.** The testbench was subsequently built and run (`stream_tb`, 348
+assertions, 0 failures, exit 0), and the replacement assertions were mutation-tested to confirm they
+can fail. The `316` is left standing here rather than overwritten because the gap between it and
+`348` — a derived count off by 32 — is itself the lesson below.
+
+The general lesson, and it is the third time this repository has met it in one session: **a count of
+assertions is not a measure of coverage.** F17's mutations all passed relational assertions; F31's
+two checks passed unconditionally. Nothing here counts how many assertions *could* fail.
+
+---
+
+## OPEN, AT THE TIME OF WRITING: these fixes are UNVERIFIED
+
+Recorded because an unverified fix presented as a fix is the exact defect this document exists to
+catch.
+
+The F31 edits to `rtl/tb/stream_tb.sv` and the F19–F30 work are now **closed**:
+
+| Item | State |
+|---|---|
+| `tests/roundtrip_fuzz.zig`, `tests/crosscheck/` | **Verified** — 452/452 tests, 39/39 steps, on a clean rebuild |
+| F19–F30 findings and their reproducing words | **Verified by hand** at the command line, one at a time |
+| Mutation proofs (both halves) | **Verified** — each fired, in a throwaway copy |
+| `rtl/tb/stream_tb.sv` F31 edits | **COMPILED AND RUN.** 348 assertions, 0 failures, exit 0 |
+| `rtl/tb/core_tb.sv`, `rtl/tb/alu_tb.sv` | Both re-run and measured: `core_tb` **159/159**, `alu_tb` **80/80** |
+| F31 replacement assertions can fail | **Proven by mutation** — forced input reported `got 0 expected 1`, exit 1 |
+| Commit | **NOT MADE.** The tree is dirty |
+
+**The `316` figure was wrong, and that is the finding.** It was arithmetic
+(314 − 2 + 4) and the measured value is **348**. Deriving a test count instead of
+running the testbench produced a number that was off by 32. The rule this
+establishes: a test count is a measurement, never a calculation.
+
+**Root cause of the ENOSPC, now identified.** It was not build output and not a
+runaway process. Verilator 5.49 generates `VK_PCH_I_FAST = $(CFG_CXXFLAGS_PCH_I)
+$(VM_PREFIX)__pch.h.fast$(CFG_GCH_IF_CLANG)`; on GCC `CFG_CXXFLAGS_PCH_I` is empty
+by design, so the precompiled header name is passed as a **bare positional
+argument** with no `-include`:
+
+```
+c++ -Os -I. ... Vstream_tb__pch.h.fast -c Vstream_tb.cpp
+```
+
+GCC finds no such source file, treats it as a linker input, then falls through to
+parsing the real 104 MB `Vstream_tb__pch.h.fast.gch` as C++ **source**, emitting
+tens of thousands of `stray '\5' in program` / `null character(s) ignored`
+diagnostics per translation unit. That flood is the 8 GB. Each `-Mdir` also held
+**two ~100 MB PCH files**.
+
+The fix is one flag, verified: `-MAKEFLAGS "VK_PCH_I_FAST= VK_PCH_I_SLOW="`. With
+it, `stream_tb` builds in **5.1 s** to a 0.57 MB binary, and the log is 4 KB.
+Earlier attempts at `VM_PCH=0`, `CFG_CXXFLAGS_PCH_I=`, `VM_PCH_H=` and
+`CFG_GCH_IF_CLANG=.gch` all failed — they address variables that do not carry the
+stray argument. The `--lint-only` path was never affected (287-byte log, exit 0),
+which is why the F31 edit passed lint while the binary build kept dying.
+
+
+

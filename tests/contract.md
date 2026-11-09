@@ -158,8 +158,10 @@ that was not observed.
   sentence was true when written and became false when a tool arrived.
 - **Satisfied:** Verilator lints the RTL with exit 0
   (`--lint-only -Wall --top-module core`, whole tree, 0 warnings) and runs three
-  testbenches with real assertions: `alu_tb` 80/80, `stream_tb` 314/314,
-  `core_tb` 159/159 — 553 in total.
+  testbenches with real assertions: `alu_tb` 80/80, `stream_tb` 348/348,
+  `core_tb` 159/159 — 587 in total, each count measured by running the built
+  binary (F31: `stream_tb` read 314 until two assertions that could not fail were
+  replaced by four that can; the earlier `553` total was correspondingly inflated).
 - Simulation is **not** synthesis, but synthesis now also runs: `zig build synth`
   maps the design to 42,775 generic cells / 22,069 iCE40 cells (see P4.2). It is
   still not timing-closed, not placed or routed, and never on silicon, and no clock

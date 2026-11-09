@@ -13,13 +13,14 @@ See [docs/fidelity.md](docs/fidelity.md) for the per-subsystem ledger.
 | Check | Result |
 |-------|--------|
 | `zig build` | exit 0, produces `zig-out/bin/celeris64` |
-| `zig build test` | **37/37 steps, 442/442 tests, exit 0** (18 roots, summed) |
+| `zig build test` | **39/39 steps, 452/452 tests, exit 0** (20 roots, summed) |
 | `zig build bench` | exit 0, prints clearly-labelled simulated counts |
 | `zig build audit` | every reserved field the contract declares is rejected — 9/9 enforced, 1 declared exemption, exit 0 |
 | `zig build live-check` | re-derives the verifier's 232 recorded facts from the current binary; catches snapshot drift |
 | `verilator --lint-only -Wall --top-module core` over `rtl/` | zero warnings (one documented false-positive suppression in `core.sv`) |
 | End-to-end pipeline | assemble → binary → disassemble → run → trace, all working |
-| Round trip | `asm → dis → asm` is **byte-identical**, with no `sed` |
+| Round trip | `asm → dis → asm` is **byte-identical for every word a source line can express** — fuzzed over 20,000 generated words, and **12 defects deep** (F19–F30). The earlier claim of unconditional byte-identity was false. |
+| Differential fuzzer | `tests/roundtrip_fuzz.zig` — 11,592 checked, 11,592 identical; every exclusion names its defect ID |
 
 ## Requirements
 

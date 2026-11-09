@@ -31,7 +31,7 @@ your counts differ, yours are correct and this table is stale.
 rm -rf .zig-cache zig-out
 ~/.local/zig/zig build              # -> exit 0
 ~/.local/zig/zig build test --summary all
-# -> Build Summary: 33/33 steps succeeded; 258/258 tests passed
+# -> Build Summary: 39/39 steps succeeded; 452/452 tests passed
 
 # A single module's tests, independently of the build graph.
 ~/.local/zig/zig test src/<module>.zig
@@ -41,7 +41,7 @@ rm -rf .zig-cache zig-out
 ```
 
 Observed on the tree at the time of writing: `zig build` exits 0, and
-`zig build test` reports **33/33 steps, 258/258 tests passed, exit 0**.
+`zig build test` reports **39/39 steps, 452/452 tests passed, exit 0**.
 
 ### Toolchain facts
 
@@ -201,8 +201,9 @@ and have been corrected here; the corrections are recorded as findings rather
 than silently overwritten.
 
 The RTL is **verified only in simulation**: it lints clean, and three
-testbenches pass with real assertions (`alu_tb` 80/80, `stream_tb` 314/314,
-`core_tb` 159/159). Simulation is not synthesis. Per the task contract,
+testbenches pass with real assertions (`alu_tb` 80/80, `stream_tb` 348/348,
+`core_tb` 159/159) — all three counts measured by running the built binaries on
+this host, not carried over. Simulation is not synthesis. Per the task contract,
 unverified RTL must not be presented as hardware, and neither must verified-in-
 simulation RTL. The honest state is: **RTL written and simulation-verified;
 hardware realization not started.** `docs/fpga-prototyping.md` records a
