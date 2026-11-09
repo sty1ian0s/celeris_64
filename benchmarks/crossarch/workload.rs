@@ -4,8 +4,15 @@
 //
 //   batch  - one call processes the whole contiguous buffer (the shape CLS64's
 //            stream engine expresses in a single instruction).
-//   scalar - eight separate calls, one element each, with the loop overhead
-//            that CLS64's element-by-element path also pays.
+//   scalar - eight separate calls, one element each, each paying its own call
+//            and loop overhead.
+//
+// NOTE (F32): this comment previously ended "...with the loop overhead that
+// CLS64's element-by-element path also pays". That equivalence was false. The C
+// scalar path really does pay call and loop overhead; the CLS64 "element-by-
+// element" path does not, because it is the SAME `stream.add` issued once per
+// element with no loop around it. The two columns are not the same shape and the
+// figures must not be paired. See docs/comparison.md §7.
 //
 // The two shapes are kept apart with #[inline(never)] and a runtime element
 // count the compiler cannot constant-fold, because with both inlined the

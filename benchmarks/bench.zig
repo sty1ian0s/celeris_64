@@ -96,18 +96,30 @@ fn batchAdd(arena: std.mem.Allocator, chunk: u4, elements: u64) !u64 {
     return runProgram(arena, try batchWords(arena, chunk));
 }
 
-/// Element-by-element path: an explicit software loop, one element per iteration.
+/// Element-by-element path: the SAME `stream.add` issued once per element.
 ///
-/// This is the pattern the architecture's §1.2 forbids for inner loops, written
-/// out honestly so the instruction-count difference can be observed rather than
-/// asserted.
+/// F32 — this comment previously said "an explicit software loop, one element per
+/// iteration" and "`chunk` separate load/add/store triples: no fused engine, one
+/// element each". **Both sentences were false.** The body below emits opcode 0x40
+/// — `stream.add`, the fused engine — with `chunk = 1`, and the batch path emits
+/// the identical word with `chunk = 8`. There is no software loop and no unfused
+/// triple in either; the two programs differ only in the chunk field, and the
+/// 4-vs-11 gap is `3 + 1` against `3 + chunk`.
+///
+/// So this measures call granularity in the benchmark source, not a property of
+/// the stream engine, which is present on both sides. It cannot be fixed here:
+/// CLS64 has no general-purpose load or store (§3.4's `stream.*` is the only
+/// non-capability memory access, and `cap.*` is decode-only), so a true
+/// single-element fetch-modify-write is not expressible. See docs/comparison.md
+/// §7 for the full statement.
 fn scalarWords(arena: std.mem.Allocator, chunk: u4) ![]u64 {
     var words = std.ArrayList(u64).empty;
     errdefer words.deinit(arena);
 
     try words.append(arena, vm.encode(0x19, 1, 0, vm.aluOperand(0, .full, data_base))); // R1 = data pointer
     try words.append(arena, vm.encode(0x19, 2, 0, vm.aluOperand(0, .full, 5))); // R2 = 5
-    // `chunk` separate load/add/store triples: no fused engine, one element each.
+    // `chunk` separate issues of the fused engine, one element each. NOT
+    // "unfused triples" — see the note on this function (F32).
     var i: u4 = 0;
     while (i < chunk) : (i += 1) {
         try words.append(arena, vm.encode(0x40, 0, 1, streamOperand(2, 1, .full)));
@@ -260,6 +272,36 @@ test "the batch path retires exactly its four instruction words" {
 
     // The batch program is exactly: R1 = data, R2 = addend, stream.add, halt.
     try testing.expectEqual(@as(u64, 4), results.batch.instructions);
+}
+
+test "F32: both paths are the same instruction, differing only in chunk (pins the doc claim)" {
+    // This test exists because the documentation described these two programs as
+    // different SHAPES — "an explicit software loop" against a fused batch — and
+    // that description was false. Both programs are mov, mov, N x stream.add,
+    // halt, and the only difference is the chunk field. If someone later adds a
+    // genuine unfused scalar path, this test fails, which is the signal to
+    // rewrite docs/comparison.md §2 instead of the code.
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // The scalar program is one stream.add per element, each with chunk = 1.
+    const scalar = try scalarWords(arena, 8);
+    try testing.expectEqual(@as(usize, 11), scalar.len);
+    for (scalar[2..10]) |word| {
+        // decode the opcode byte: every one must be 0x40, the FUSED engine.
+        try testing.expectEqual(@as(u8, 0x40), @as(u8, @truncate(word >> 56)));
+    }
+
+    // The batch program is one stream.add with chunk = 8 — the same opcode.
+    const batch = try batchWords(arena, 8);
+    try testing.expectEqual(@as(usize, 4), batch.len);
+    try testing.expectEqual(@as(u8, 0x40), @as(u8, @truncate(batch[2] >> 56)));
+
+    // And the two differ ONLY in the chunk field (bits [43:24] of the operand).
+    const mask: u64 = (@as(u64, 0xFFFFF) << 24);
+    try testing.expectEqual(batch[2] & ~mask, scalar[2] & ~mask);
+    try testing.expect((batch[2] & mask) != (scalar[2] & mask));
 }
 
 test "neither benchmark program modifies its own instructions" {
