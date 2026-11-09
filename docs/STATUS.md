@@ -2081,7 +2081,26 @@ decoder was the first). Both were found by asking what a passing check actually
 
 ## F41: the example suite's eighth kernel was attempted twice and landed neither time
 
-**Status: open — and the honest outcome is "not delivered", not "blocked by a defect".**
+> **CLOSED — the eighth kernel landed on the third attempt, as `signed_max`.** The
+> original entry is kept below, because the two failed attempts are what produced the
+> method that worked. See "How it was finally landed" at the end of this entry.
+>
+> **Result: 8 kernels x 4 ISAs, all byte-equivalent, CLS64 loses as declared.**
+>
+> ```
+> signed_max  Celeris-64 CLS64   2306 simulated   18448   loss   9222717111107562960
+> signed_max  RISC-V RV64I       1550 simulated    6200   loss   9222717111107562960
+> signed_max  AArch64 A64        2058 simulated    8232   loss   9222717111107562960
+> signed_max  x86-64             2058 simulated    5931   loss   9222717111107562960
+> ```
+>
+> **Both earlier attempts were right to stop.** This one did not repeat their mistake
+> because it followed the rule they established: **every instruction was verified
+> against this repository's own decoders BEFORE the first measurement.** That step
+> caught three real defects that llvm-mc alone would have let through (see below).
+
+**Status at the time: open — and the honest outcome is "not delivered", not "blocked by
+a defect".**
 No code changed. `src/examples.zig` is byte-identical to `f3826f2`. This entry exists so
 the next attempt does not restart from zero, which is the only thing two attempts at this
 produced that is worth keeping.
@@ -2089,7 +2108,7 @@ produced that is worth keeping.
 Both attempts stopped for the **same reason and both stopped correctly**: each wrote a
 kernel whose CLS64 program did not actually compute what the other three did, and each
 caught it and reverted rather than shipping it. Neither failure was a repository defect.
-The suite still passes: 7 kernels x 4 ISAs, `zig build examples` exit 0.
+The suite passed at the time: 7 kernels x 4 ISAs, `zig build examples` exit 0.
 
 ### The interesting part is *why* CLS64 kept silently ceasing to be equivalent
 
@@ -2178,3 +2197,60 @@ memory copy, a bit-manipulation kernel, a straightforward nested-loop reduction)
 through the decoders **before** measuring; and declare `.expected_loss`. Budget the kernel
 first and the generator second — or better, hand-write the four programs and skip the
 generator, which is what ate both attempts.
+
+### How it was finally landed — and the three defects the decoder check caught
+
+The kernel is **`signed_max`**: the signed maximum of 256 `u64` words. It was chosen
+deliberately against the two failed attempts' lessons:
+
+- **No calibration and no fixed-point argument.** The shape is a plain comparison-shaped
+  reduction, which is a shape `stream.add` cannot chunk (it applies one constant to every
+  element), so CLS64 is expected to lose and no per-ISA cost argument is needed to say so.
+- **The four programs were HAND-WRITTEN, not generated.** F41's procedural finding was that
+  both earlier attempts burned their whole budget on generation plumbing (three scratch
+  toolchains) and never reached measurement. This one wrote nineteen instructions per ISA
+  by hand.
+- **Signedness is the subject.** The words have their top bit set about half the time, so
+  an implementation that compared unsigned gets a different answer:
+  signed `0x7ffdac59377badd0` versus unsigned `0xffb598a8e9273fd6`. That difference is what
+  makes the *comparison*, rather than the loop, the thing being tested.
+
+**Every instruction was verified against this repository's own decoders BEFORE the first
+measurement**, which is the rule the two failed attempts established. **llvm-mc was not
+sufficient, and three defects were caught by the repo's decoders that llvm-mc accepted
+happily:**
+
+1. **RISC-V `ecall` needs `a7`, not any register.** The first draft did `li a5, 93; ecall`.
+   llvm-mc encodes it, but `src/isa_riscv.zig` requires `read(17) == 93` — register **x17 =
+   a7** — and otherwise returns `UnsupportedSystemInstruction`. The program computed the
+   right answer and then **faulted at the halt**, which a count-only check would have read
+   as a result. Fixed to `li a7, 93` (`0x05D00893`), after which it halts cleanly.
+2. **AArch64 has no register-form `mov` in this subset.** `mov x3, x5` is the ORR form
+   (`0xAA...`), and the decoder's dispatch covers ADD/SUB/CMP shifted-register
+   (`0x8B`/`0xCB`/`0xEB`) but **not** ORR. There is no `csel` either. Replaced with
+   `add x3, x5, #0` (`0x910000A3`) — the ADD-immediate form, which is implemented.
+3. **x86-64 termination is a self-branch, not a return to an earlier label.** The first
+   draft ended `movq %rsi, (%rdi); jmp .L2` where `.L2` was that `movq`. The loop then
+   re-ran forever and **hit the 2,000,000-step limit** — while still having stored the
+   correct answer, so an answer-only check would have passed it. `runToSelfBranch` halts on
+   `pc == before`, so the program must end `jmp .` (`0xEB 0xFE`), as the existing kernels do.
+
+All three are the **same class**: a program that llvm-mc assembles and that produces the
+right bytes at `result_addr` while being wrong in a way the *count* would not reveal. That
+is the F41 lesson restated, and it is why the decoders — not llvm-mc — are the oracle for
+this repository's subsets.
+
+**Verified by running:**
+- `zig build examples` — 8 kernels x 4 ISAs, all four `signed_max` rows agree on
+  `9222717111107562960`, verdict `loss`, exit 0.
+- `zig build test` (cold) — 53/53 steps, **1016/1016** tests, exit 0.
+- **Mutation, in a throwaway copy (never the shared tree):** changing CLS64's
+  `[GREATER]` to `[UNSIGNED_GREATER]` makes the suite report
+  `"signed_max": RISC-V RV64I is NOT equivalent to Celeris-64: the final data images first
+  differ at address 8448 (CLS64 119, this ISA 208)` and the examples build **fail**. So the
+  kernel is load-bearing: it genuinely distinguishes a signed reduction from an unsigned one.
+
+**CLS64 loses this kernel: 2306 retired against RISC-V's 1550, and 2058 for both AArch64
+and x86-64.** That is the declared and expected outcome — CLS64 pays `compare` + `branch`
+plus an unconditional `jump` to rejoin, where the others fall through. **Do not tune the
+programs to change it.**

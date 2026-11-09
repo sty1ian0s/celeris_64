@@ -649,6 +649,94 @@ pub const examples = [_]Example{
         },
         .answer = 9548232127993293227,
     },
+
+    // ====================================================================
+    // signed_max
+    // ====================================================================
+    // WHY IT IS HERE, AND WHY CLS64 IS EXPECTED TO LOSE: a reduction whose body is a
+    //     COMPARISON rather than the uniform arithmetic the fused engine can chunk.
+    //     `stream.add` applies one constant to every element; finding a maximum is not
+    //     of that shape at all, so CLS64 runs the same per-element loop as everyone
+    //     else and pays for its compare + branch + unconditional jump on top.
+    //
+    //     The signedness is the point: this is a SIGNED reduction over words whose top
+    //     bit is set about half the time, so an implementation that compared unsigned
+    //     would get a different (and wrong) answer. That the four programs must agree
+    //     on the SIGNED maximum is what makes the comparison, not the loop, the subject.
+    //
+    //     It is deliberately the plainest possible instance of this shape - no shift,
+    //     no bit trick, no calibration constant - because an earlier attempt at an
+    //     eighth kernel (recorded as F41 in docs/STATUS.md) failed by quietly
+    //     computing a different operation in CLS64 while the other three agreed. Every
+    //     instruction used here was checked against this repository's own decoders
+    //     before the first measurement, which is what F41 requires.
+    .{
+        .name = "signed_max",
+        .what = "the signed maximum of 256 u64 words (a comparison-shaped reduction)",
+        .expectation = .expected_loss,
+        .data = word_data,
+        .cls64 =
+        \\# The signed maximum of 256 u64 words.
+        \\#
+        \\# `compare` produces the status enum and `branch` tests it, so the update is a
+        \\# conditional move written as a branch. CLS64 pays `compare` + `branch` for the
+        \\# test plus an unconditional `jump` to rejoin, which the other three do not.
+        \\mov R1, 8192        # cursor
+        \\mov R2, 0           # bytes consumed
+        \\mov R3, 2048        # total bytes
+        \\mov R5, 8448        # result slot
+        \\load R6, [R1+0]     # running max, seeded with element 0
+        \\add R1, R1, 8
+        \\add R2, R2, 8
+        \\loop:
+        \\compare R9, R2, R3
+        \\branch R9, [EQUAL], done
+        \\load R7, [R1+0]
+        \\compare R9, R7, R6
+        \\branch R9, [GREATER], take
+        \\jump next
+        \\take:
+        \\mov R6, R7
+        \\next:
+        \\add R1, R1, 8
+        \\add R2, R2, 8
+        \\jump loop
+        \\done:
+        \\store R6, [R5+0]
+        \\halt
+        ,
+        // `bge a3, a5, skip` is the signed `>=`; `a7 = 93; ecall` is the halt this
+        // simulator implements. Both verified against src/isa_riscv.zig, not llvm-mc
+        // alone: llvm-mc accepts an `ecall` after `li a5, 93`, which this decoder
+        // rejects because the halt reads register 17 (a7) specifically.
+        .riscv = &.{
+            0x00002537, 0x00000593, 0x00100613, 0x00b61613, 0x00002737, 0x1007071b,
+            0x00053683, 0x00850513, 0x00858593, 0x00c5de63, 0x00053783, 0x00f6d463,
+            0x00078693, 0x00850513, 0x00858593, 0xFE9FF06F, 0x00D73023, 0x05D00893,
+            0x00000073,
+        },
+        // This subset has no register-form `mov` (ORR, 0xAA...) and no `csel`, so the
+        // conditional update is `add x3, x5, #0` - the ADD-immediate form, which the
+        // decoder does implement. Terminates by branching to itself, which is how this
+        // simulator's AArch64 programs halt.
+        .aarch64 = &.{
+            0xD2840000, 0xD2800001, 0xD2810002, 0xD2842004, 0xF9400003, 0x91002000,
+            0x91002021, 0xEB02003F, 0x54000100, 0xF9400005, 0xEB05007F, 0x5400004A,
+            0x910000A3, 0x91002000, 0x91002021, 0x17FFFFF8, 0xF9000083, 0x14000000,
+        },
+        // `jmp .` (0xEB 0xFE) is the self-branch the harness treats as a halt; a jump
+        // to any other address would spin to the step limit instead. Uses r8, in the
+        // extended register space that F38 was about.
+        .x86 = &.{
+            0x48, 0xC7, 0xC0, 0x00, 0x20, 0x00, 0x00, 0x48, 0x31, 0xC9, 0x48, 0xC7,
+            0xC2, 0x00, 0x08, 0x00, 0x00, 0x48, 0xC7, 0xC7, 0x00, 0x21, 0x00, 0x00,
+            0x48, 0x8B, 0x30, 0x48, 0x83, 0xC0, 0x08, 0x48, 0x83, 0xC1, 0x08, 0x48,
+            0x39, 0xD1, 0x74, 0x15, 0x4C, 0x8B, 0x00, 0x4C, 0x39, 0xC6, 0x7D, 0x03,
+            0x4C, 0x89, 0xC6, 0x48, 0x83, 0xC0, 0x08, 0x48, 0x83, 0xC1, 0x08, 0xEB,
+            0xE6, 0x48, 0x89, 0x37, 0xEB, 0xFE,
+        },
+        .answer = 9222717111107562960,
+    },
 };
 
 // ---------------------------------------------------------------------------
@@ -682,6 +770,19 @@ pub fn answerFor(name: []const u8) u64 {
         var acc: u64 = 0;
         for (byte_data) |b| acc += b;
         return acc;
+    }
+    if (std.mem.eql(u8, name, "signed_max")) {
+        // The SIGNED maximum, taken from the input rather than written as a constant.
+        // The first word seeds it, exactly as the four programs seed theirs, so an
+        // implementation that mishandles the initial element disagrees here too.
+        const first: i64 = @bitCast(std.mem.readInt(u64, word_data[0..8], .little));
+        var best: i64 = first;
+        var i: usize = 8;
+        while (i < word_data.len) : (i += 8) {
+            const v: i64 = @bitCast(std.mem.readInt(u64, word_data[i..][0..8], .little));
+            if (v > best) best = v;
+        }
+        return @bitCast(best);
     }
     if (std.mem.eql(u8, name, "word_sum")) {
         var acc: u64 = 0;
