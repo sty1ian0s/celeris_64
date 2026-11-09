@@ -8,9 +8,9 @@ running something; claims that were not observed are marked as such.
 ## 1. Repository state
 
 ```
-HEAD         efa86bf  docs(status): F36 closed by Amendment 1.18; F38 and F39 recorded
-remote       origin/main, IN SYNC as of efa86bf (pushed)
-working tree CLEAN (at efa86bf)
+HEAD         fb3782e  feat(isa): integer multiply on AArch64 and x86-64, and an 8x8 matmul example
+remote       origin/main, IN SYNC as of fb3782e (pushed)
+working tree CLEAN (at fb3782e)
 ```
 
 Fifteen commits landed this session, in this order:
@@ -36,11 +36,11 @@ Fifteen commits landed this session, in this order:
 **The previous handoff's blocking item is done.** The dirty tree it described is
 committed, the 3 failing label tests pass, and the labels work is byte-verified.
 
-### Gates, all run on a cold cache at `efa86bf`
+### Gates, all run on a cold cache at `fb3782e`
 
 ```sh
 rm -rf .zig-cache && ~/.local/zig/zig build test --summary all
-  -> Build Summary: 51/51 steps succeeded; 932/932 tests passed   exit 0
+  -> Build Summary: 53/53 steps succeeded; 978/978 tests passed   exit 0
 
 ~/.local/zig/zig build examples    -> exit 0, 6 kernels x 4 ISAs, all equivalent
 tools/accel_e2e.sh                 -> 10/10 checks passed (run by hand; see below)
@@ -52,9 +52,9 @@ tools/accel_e2e.sh                 -> 10/10 checks passed (run by hand; see belo
 fuzzer (inside build test)         -> checked=11839 identical=11839, 0 mismatches
 ```
 
-The test count moved 570 -> 932 across this session: the labels work, the
-accelerator amendment (11 of 13 opcodes now execute), the six-kernel example suite,
-and the x86-64 REX fix.
+The test count moved 570 -> 978 across this session: the labels work, the
+accelerator amendment (11 of 13 opcodes now execute), the seven-kernel example suite,
+the x86-64 REX fix, the static analyzer, and integer multiply on AArch64 and x86-64.
 
 ### The goal is re-created and ARMED
 
@@ -122,16 +122,18 @@ scalar-loop result — it is a fused sequence at `chunk = 1`.
 
 ## 3. What remains
 
-1. **The accelerators — now blocked on a CONTRACT decision, not on code.** The VM
-   half is done (`9a9b193`): all thirteen §3.6 opcodes dispatch to
-   `refuseAccelerator`, reserved bytes read differently, and none executes. The
-   refusal is deliberate and is recorded as **F36**.
+1. **The accelerators are DONE — 11 of 13 execute (Amendment 1.18, `af24bac`).**
+   Two remain refused, each for a reason that is a property of the operation rather
+   than a missing constant: `matrix.mul` (0x62) needs three addresses plus two orders
+   — five inputs for four fields — and `codec.decompress` (0x81) needs an `out.len`
+   bound that reusing `compress`'s 256-byte workspace cannot honestly supply. Closing
+   either needs a **second opcode**, which an amendment that does not change the
+   encoding may not add. See F36 in `docs/STATUS.md`.
 
-   **An earlier draft of this handoff said the work was "read a register as an
-   address, derive the count, call the model, write back". That was wrong, and the
-   error is worth keeping visible**, because it is the natural assumption and the
-   teammate who hit it was right to stop rather than implement it. What the contract
-   actually lacks:
+   **An earlier draft of this handoff said this work was "read a register as an
+   address, derive the count, call the model, write back". That was wrong**, and the
+   error is kept visible because it is the natural assumption. What the contract
+   actually lacked, and what Amendment 1.18 supplied:
 
    | Missing rule | Affects |
    |---|---|
@@ -142,13 +144,13 @@ scalar-loop result — it is a fused sequence at `chunk = 1`.
    | What `count = 0` means: §3.6:490 says "derive the count from the destination register" and never says what `rd` holds | all thirteen |
    | Which **unit** `count` uses: fft says "element count", codec is byte-oriented, and a complex element is 16 bytes — a 16× difference | `0x70`–`0x73`, `0x80`–`0x83` |
 
-   So the next step is **not** a VM change. It is a §3.6 amendment stating, per
-   operation, where each dimension and output buffer comes from and what
+   So the next step for those two was **not** a VM change. It was a §3.6 amendment
+   stating, per operation, where each dimension and output buffer comes from and what
    `count = 0` means — the same kind of amendment Amendment 1.1 already made for the
-   operand layout. Until then, refusing is correct: a guessed dimension produces a
-   wrong determinant that the simulator would report confidently.
+   operand layout. **Amendment 1.18 made it** (`af24bac`), which is why 11 of the 13
+   now execute. The two that remain need a second opcode, not a further amendment.
 
-   Two things that will bite when the amendment lands: the models take
+   Two things that will bite anyone extending this: the models take
    `[]f64`/`[]u8`/`[]Complex` views into a flat `[]u8` whose base alignment is **not**
    guaranteed (`Vm.init` accepts any `[]u8`; tests use an align-1 allocator), so an
    alignment check must precede any `@alignCast` — a misaligned cast panics. And the
@@ -169,8 +171,14 @@ scalar-loop result — it is a fused sequence at `chunk = 1`.
    the lookup, or reword §3.6 to say the *simulator* refuses them. Both defensible;
    picking one silently is not. Not a live defect today, because the VM does the
    lookup correctly.
-3. **The example suite, analyzers, instruction counter** — the bulk of the goal,
-   genuinely unblocked only after 1.
+3. **The example suite and analyzers are DONE; the instruction counter is DONE.**
+   `zig build examples` prints seven kernels × four ISAs with byte-for-byte
+   equivalence, and `src/analyzer.zig` ships one sound analyzer. What remains is
+   *breadth*, not mechanism: more examples, and more analyzers (five were rejected as
+   unsound — see the analyzer module header for the correct programs that break each).
+   **CLS64 loses all seven kernels**, and loses worst of four on the largest
+   (`matmul_8x8`: 11044 retired against x86-64's 4838). That is the intended result,
+   not a tuning failure. Do not "fix" it by changing the programs.
 4. **`cap.*`** stays decode-only. §3.5 v1.12 explains why: the register pair has
    no `length` bit position, so a capability cannot be reconstructed. Needs a §6
    redesign, not a bug fix. Do not "fix" it by inventing a field layout.
