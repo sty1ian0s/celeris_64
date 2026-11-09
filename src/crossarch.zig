@@ -217,6 +217,9 @@ fn aarch64Scalar() [19]u32 {
         a64.str(3, 5, 0), // [x5] = x3
         a64.addImm(2, 2, 8), // i += 8
         a64.cmp(2, 4), // cmp i, limit
+        // b.ne loop: the body starts at word 4 and this branch is word 10, so the
+        // displacement is (4 - 10) * 4 = -24 bytes. Encoded words checked against
+        // llvm-mc: `b.ne` here is 0x54FFFF41.
         a64.bCond(0x1, -24), // b.ne loop
         a64.bUncond(0), // done: b .
         a64.nop(),
@@ -367,14 +370,26 @@ const Cls64 = struct {
 /// batch: `mov R2, 5` then one `stream.add R0, [R1]+8, R2`, then halt. The fused
 /// engine walks all 8 elements in a single instruction.
 ///
-/// scalar: the SAME instruction issued once per element with `chunk = 1`.
+/// scalar: a REAL per-element loop, written with the scalar `load` (0x1A) and
+/// `store` (0x1B) instructions added in v1.17: fetch one element from `base + i`,
+/// add the addend, store it back, advance `i` by 8, and branch back while
+/// `i != 64`. Same shape as the RISC-V, AArch64 and x86-64 scalar rows — one
+/// element per iteration with its own address arithmetic — so the four scalar rows
+/// are finally comparable to each other.
 ///
-/// NOTE (F32): these two programs are NOT two different shapes — they are one
-/// instruction at two granularities, and the difference between them is
-/// arithmetic rather than algorithmic. They are included here for completeness and
-/// are labelled as such in the report, because a reader who compared the "scalar"
-/// row against RISC-V's scalar row would otherwise be comparing a loop against a
-/// loop-less sequence.
+/// NOTE (F32, corrected): this file previously used the SAME fused `stream.add`
+/// (0x40) for both shapes, once with `chunk = 8` and eight times with `chunk = 1`,
+/// and recorded that the two "shapes" were one instruction at two granularities.
+/// That was true then, because through v1.16 the ISA had no `load`/`store` and no
+/// conditional branch, so an unfused loop **could not be written at all**. The
+/// v1.17 additions removed that reason. The scalar row is now a genuine loop and
+/// the batch row is still the fused engine — so the two CLS64 rows ARE two
+/// different shapes, and the batch/scalar gap is now a real algorithmic
+/// difference rather than a chunk-size arithmetic difference.
+///
+/// The scalar loop retires MORE instructions than the row it replaced. That is the
+/// honest outcome, not a regression: the old number was measuring a fused sequence
+/// under a scalar label.
 fn cls64Program(alloc: std.mem.Allocator, comptime shape: Shape) ![]u8 {
     const vm = @import("vm.zig");
     var words = std.ArrayList(u64).empty;
@@ -386,14 +401,10 @@ fn cls64Program(alloc: std.mem.Allocator, comptime shape: Shape) ![]u8 {
         // One fused stream.add over all 8 elements.
         const oper = (@as(u48, 2) << 44) | (@as(u48, @intCast(elements)) << 24);
         try words.append(alloc, vm.encode(0x40, 0, 1, oper));
+        try words.append(alloc, vm.encode(0x01, 0, 0, 0)); // halt
     } else {
-        var i: u64 = 0;
-        while (i < elements) : (i += 1) {
-            const oper = (@as(u48, 2) << 44) | (@as(u48, 1) << 24);
-            try words.append(alloc, vm.encode(0x40, 0, 1, oper));
-        }
+        try scalarLoop(alloc, &words, vm);
     }
-    try words.append(alloc, vm.encode(0x01, 0, 0, 0)); // halt
 
     const bytes = try alloc.alloc(u8, mem_size);
     @memset(bytes, 0);
@@ -401,6 +412,72 @@ fn cls64Program(alloc: std.mem.Allocator, comptime shape: Shape) ![]u8 {
         std.mem.writeInt(u64, bytes[i * 8 ..][0..8], word, .little);
     }
     return bytes;
+}
+
+/// The CLS64 scalar row: a real unfused per-element loop, appended to `words`.
+///
+/// ```txt
+///   mov  R1, data        # R1 = base
+///   mov  R2, 5           # R2 = addend
+///   mov  R3, 0           # R3 = i
+///   mov  R4, 64          # R4 = byte limit
+/// loop:
+///   add  R5, R1, R3      # address = base + i
+///   load R6, [R5+0]      # value = memory[address]
+///   add  R6, R6, R2      # value += addend
+///   store R6, [R5+0]     # memory[address] = value
+///   add  R3, R3, 8       # i += 8
+///   compare R7, R3, R4   # R7 = status(i vs limit)
+///   branch R7, [EQUAL], done
+///   jump loop
+/// done:
+///   halt
+/// ```
+///
+/// Every instruction here does the same job as its counterpart in
+/// `riscvScalar()`/`aarch64Scalar()`/`x86Scalar()`: one element loaded, one add,
+/// one store back, one index bump, one test, one branch. Nothing is added to the
+/// other three rows to make this one look better.
+///
+/// Two encoding details that are easy to get wrong and are therefore stated:
+/// the branch offset is **relative to the branch instruction itself** (§3.0.1),
+/// not to the next instruction, so `done - branch_pc` is the value; and `load`'s
+/// `rs2` and `store`'s `rd` are reserved-zero (§3.1.1), which the decoder
+/// enforces, so both are passed as 0.
+fn scalarLoop(alloc: std.mem.Allocator, words: *std.ArrayList(u64), vm: type) !void {
+    // Loop setup. This must NOT be inside the loop: `i` is re-initialised here, so
+    // jumping back to it instead of to the body would reset the index every
+    // iteration and never terminate. `loop_body` is therefore captured after it.
+    try words.append(alloc, vm.encode(0x19, 3, 0, vm.aluOperand(0, .full, 0))); // mov R3, 0  (i)
+    try words.append(alloc, vm.encode(0x19, 4, 0, vm.aluOperand(0, .full, @intCast(elements * 8)))); // mov R4, 64
+
+    const loop_body = words.items.len; // the first body instruction's index
+
+    try words.append(alloc, vm.encode(0x10, 5, 1, vm.aluOperand(3, .full, 0))); // add R5, R1, R3
+    try words.append(alloc, vm.encode(0x1A, 6, 5, vm.aluOperand(0, .full, 0))); // load R6, [R5+0]
+    try words.append(alloc, vm.encode(0x10, 6, 6, vm.aluOperand(2, .full, 0))); // add R6, R6, R2
+    try words.append(alloc, vm.encode(0x1B, 0, 5, vm.aluOperand(6, .full, 0))); // store R6, [R5+0]
+    try words.append(alloc, vm.encode(0x10, 3, 3, vm.aluOperand(0, .full, 8))); // add R3, R3, 8
+    try words.append(alloc, vm.encode(0x20, 7, 3, vm.aluOperand(4, .full, 0))); // compare R7, R3, R4
+
+    // `compare` yields EQUAL (0) once i reaches the limit, so the branch EXITS on
+    // EQUAL, skipping over the jump back to `done` (the halt word, two on).
+    const exit_offset: i64 = 2 * 8;
+    try words.append(alloc, branchWord(7, 0, exit_offset)); // branch R7, [EQUAL], done
+
+    // `jump` takes an absolute `imm48`, and the image is flat, so the loop's
+    // address is simply its index * 8.
+    const back_target: u48 = @intCast(loop_body * 8);
+    try words.append(alloc, vm.encode(0x02, 0, 0, back_target)); // jump loop
+    try words.append(alloc, vm.encode(0x01, 0, 0, 0)); // halt
+}
+
+/// §3.0.1 `branch` word: `rs1` = status register, `rs2` = match value,
+/// `operand[27:0]` = signed byte displacement from the branch itself.
+fn branchWord(rs1: u4, match: u4, offset: i64) u64 {
+    const raw: u28 = @truncate(@as(u64, @bitCast(offset)));
+    return (@as(u64, 0x05) << 56) | (@as(u64, rs1) << 48) |
+        (@as(u64, match) << 44) | raw;
 }
 
 fn runCls64(alloc: std.mem.Allocator, comptime shape: Shape) !Measurement {
