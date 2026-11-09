@@ -37,7 +37,7 @@ rm -rf .zig-cache && ~/.local/zig/zig build test --summary all
   -> Build Summary: 53/53 steps succeeded; 1016/1016 tests passed   exit 0
 
 bash tests/mulout_e2e.sh           -> 6/6 checks passed        exit 0
-~/.local/zig/zig build examples    -> 12 kernels x 4 ISAs, all byte-equivalent
+~/.local/zig/zig build examples    -> 13 kernels x 4 ISAs, all byte-equivalent
 ~/.local/zig/zig build audit       -> 9/9 enforcement points, all 9 rejected when set
 ~/.local/zig/zig build live-check  -> all 232 recorded facts still reproduce
 ~/.local/zig/zig build crossarch   -> 8 rows, no !! warnings
@@ -257,12 +257,24 @@ test really exercises the shipped programs rather than only fixtures.
 
 ## 6. What remains
 
-1. **More example kernels.** Twelve are delivered: `fused_stream_add`, `stream_copy_sum`,
-   `count_rises`, `band_count`, `xor_reduce`, `soa_combine`, `loop_sum`, `byte_sum`,
-   `word_sum`, `stride_sum`, `matmul_8x8`, `signed_max`. The suite runs 12 kernels x 4 ISAs.
-   **Every shape the objective named is now covered** — branch control flow, memory copy,
-   bit-manipulation with a non-identity result, and struct-of-arrays traversal as of
-   `soa_combine`. Further kernels are breadth, not coverage of a named gap.
+1. **More example kernels.** Thirteen are delivered: `fused_stream_add`, `stream_copy_sum`,
+   `count_rises`, `band_count`, `xor_reduce`, `select_sum`, `soa_combine`, `loop_sum`,
+   `byte_sum`, `word_sum`, `stride_sum`, `matmul_8x8`, `signed_max`. The suite runs 13
+   kernels x 4 ISAs. **Every shape the objective named is covered** — branch control flow,
+   memory copy, bit-manipulation with a non-identity result, and struct-of-arrays traversal.
+
+   `select_sum` closes a gap the named list did not mention but that mattered more: **twelve
+   kernels had been written and not one contained a `select`**. The architecture's headline
+   branchless primitive was entirely unexercised, and a suite that never uses a primitive
+   cannot be evidence about it. The kernel sums only the signed-positive words, so each
+   element either contributes or does not — a data-dependent choice, which is what `select`
+   exists for. CLS64 is the only branchless body, RISC-V synthesises the mask with
+   `slt`+`neg`+`and`, and AArch64/x86-64 must branch because neither subset here has CSEL or
+   CMOV. **CLS64 still loses** (2314 against 2316/2174/2174), and for the reason that has
+   decided every kernel: `select` is paid on every iteration, while a branch that is not
+   taken costs nothing to retire — and this repository simulates retirement, not
+   misprediction. Declared `expected_loss` before measuring; the measurement agreed.
+   **The suite has 13 kernels, 1 win and 12 losses.**
 
    The rule for each new kernel is in §4 and F41, and it has earned its keep three times:
    **verify every instruction against `src/isa_*.zig` before measuring**, hand-write the
@@ -301,7 +313,7 @@ test really exercises the shipped programs rather than only fixtures.
 5. **`cap.*`** stays decode-only. §3.5 v1.12 explains why: the register pair has no
    `length` bit position, so a capability cannot be reconstructed. Needs a §6 redesign, not
    a bug fix.
-6. **CLS64 loses eleven of the twelve example kernels** — but NOT all of them any more.
+6. **CLS64 loses twelve of the thirteen example kernels** — but NOT all of them any more.
    `stream_copy_sum` is the first WIN: 1801 retired against RISC-V's 3342, AArch64's 3853
    and x86-64's 3085. It wins because the kernel is **purely streaming** — one fused
    `stream.copy` replaces the other three ISAs' entire 256-iteration copy loop — and the

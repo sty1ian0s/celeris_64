@@ -567,6 +567,96 @@ pub const examples = [_]Example{
     },
 
     // ====================================================================
+    // select_sum
+    // ====================================================================
+    // WHY IT IS HERE: this is the first example that uses `select` at all. Twelve kernels
+    //     were written before it and NOT ONE contained a `select`, so the architecture's
+    //     headline branchless primitive (AGENTS.md §3.2, and the reason §3.2.1 defines a
+    //     five-member status enum rather than a boolean) was entirely unexercised by the
+    //     suite. A kernel that never uses a primitive cannot be evidence about it.
+    //
+    //     The workload: sum only the words that are signed-positive, so each element either
+    //     contributes or does not. That is a data-dependent choice, which is exactly what
+    //     `select` exists to make without a branch.
+    //
+    //     WHY CLS64 IS EXPECTED TO LOSE, AND WHY THAT IS THE INTERESTING PART: CLS64 is
+    //     the only ISA here whose body is genuinely BRANCHLESS - `compare` then `select`,
+    //     with no conditional edge at all. RISC-V has no `select` either, so it must
+    //     synthesise the mask with `slt` + `neg` + `and`, which is also branchless.
+    //     AArch64 and x86-64 have no conditional-select in the subsets this repository
+    //     implements (`src/isa_aarch64.zig` has no CSEL; the x86 subset has no CMOV), so
+    //     both must branch.
+    //
+    //     CLS64 still LOSES, and the reason is the same one that has decided every other
+    //     kernel: `select` costs an instruction in the body on EVERY iteration, while the
+    //     branch it removes is only taken on some iterations - and this repository
+    //     simulates retirement, not misprediction. A branch that is not taken costs
+    //     nothing to retire, so removing it saves nothing, while `select` is paid for
+    //     unconditionally. The declared expectation is a LOSS; it was declared before the
+    //     measurement and the measurement agreed.
+    .{
+        .name = "select_sum",
+        .what = "sum only the signed-positive words: a data-dependent choice made with `select` rather than a branch",
+        .expectation = .expected_loss,
+        .data = word_data,
+        .cls64 =
+        \\# Sum the words that are signed-positive, choosing with `select` and never branching.
+        \\#
+        \\# R6 holds zero and is the false arm: a word that fails the test contributes zero
+        \\# rather than being skipped, so the body has no conditional edge at all.
+        \\mov R1, 8192        # cursor
+        \\mov R2, 0           # sum
+        \\mov R3, 0           # bytes consumed
+        \\mov R4, 2048        # total bytes
+        \\mov R5, 8448        # result slot
+        \\mov R6, 0           # the false arm
+        \\loop:
+        \\compare R9, R3, R4
+        \\branch R9, [EQUAL], done
+        \\load R7, [R1+0]
+        \\compare R8, R7, R0       # R8 = status of (element vs zero)
+        \\select R7, R8, [GREATER], R7, R6
+        \\add R2, R2, R7
+        \\add R1, R1, 8
+        \\add R3, R3, 8
+        \\jump loop
+        \\done:
+        \\store R2, [R5+0]
+        \\halt
+        ,
+        // No `select` here either: RISC-V has no conditional-move in RV64I, so the mask is
+        // built with `slt` (funct3=2, signed less-than) then `neg` (sub from x0). `slt a7,
+        // a5, a6` with a5 = 0 gives 1 exactly when the element is positive; negating turns
+        // that into an all-ones mask. Every instruction checked against src/isa_riscv.zig:
+        // `slt` and `sub` are both implemented, and `li a7, 93; ecall` is the halt it reads.
+        .riscv = &.{
+            0x00002537, 0x00000593, 0x00000613, 0x00100693, 0x00B69693, 0x00002737,
+            0x1007071B, 0x00000793, 0x02D60263, 0x00053803, 0x0107A8B3, 0x411008B3,
+            0x01187833, 0x010585B3, 0x00850513, 0x00860613, 0xFE1FF06F, 0x00B73023,
+            0x05D00893, 0x00000073,
+        },
+        // This subset has NO CSEL, so the choice MUST be a branch - `b.le` over the one
+        // `add`. That is the honest form for this ISA here, and it is what makes the
+        // comparison interesting rather than a like-for-like `select` on all four.
+        // `cmp x5, #0` is SUBS-immediate with the result discarded.
+        .aarch64 = &.{
+            0xD2840000, 0xD2800001, 0xD2800002, 0xD2810003, 0xD2842004, 0xEB03005F,
+            0x54000100, 0xF9400005, 0xF10000BF, 0x5400004D, 0x8B050021, 0x91002000,
+            0x91002042, 0x17FFFFF8, 0xF9000081, 0x14000000,
+        },
+        // `testq %r8, %r8` then `jle`: the x86 subset implements no CMOV, so this is
+        // branchy too. `jmp .` (EB FE) is the self-branch halt the harness detects.
+        .x86 = &.{
+            0x48, 0xC7, 0xC0, 0x00, 0x20, 0x00, 0x00, 0x48, 0x31, 0xC9, 0x48, 0x31,
+            0xF6, 0x48, 0xC7, 0xC2, 0x00, 0x08, 0x00, 0x00, 0x48, 0xC7, 0xC7, 0x00,
+            0x21, 0x00, 0x00, 0x48, 0x39, 0xD6, 0x74, 0x15, 0x4C, 0x8B, 0x00, 0x4D,
+            0x85, 0xC0, 0x7E, 0x03, 0x4C, 0x01, 0xC1, 0x48, 0x83, 0xC0, 0x08, 0x48,
+            0x83, 0xC6, 0x08, 0xEB, 0xE6, 0x48, 0x89, 0x0F, 0xEB, 0xFE,
+        },
+        .answer = 5206915077829159900,
+    },
+
+    // ====================================================================
     // soa_combine
     // ====================================================================
     // WHY IT IS HERE: this is the STRUCT-OF-ARRAYS kernel, and its whole point is the
@@ -1190,6 +1280,17 @@ pub fn answerFor(name: []const u8) u64 {
             c +%= a *% b;
         }
         return c;
+    }
+    if (std.mem.eql(u8, name, "select_sum")) {
+        // Sum only the words that are signed-positive. The reference recomputes the
+        // contribution of each element independently of how any program chose to skip it.
+        var acc: u64 = 0;
+        var i: usize = 0;
+        while (i < word_data.len) : (i += 8) {
+            const x = std.mem.readInt(u64, word_data[i..][0..8], .little);
+            if (@as(i64, @bitCast(x)) > 0) acc +%= x;
+        }
+        return acc;
     }
     if (std.mem.eql(u8, name, "soa_combine")) {
         // Two parallel field planes over the same 256 words: field A from 8192 and
