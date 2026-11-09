@@ -184,6 +184,9 @@ pub const Alu = struct {
     rs2: u4,
     width: Width,
     imm: ?i64,
+    /// The raw 48-bit operand field, kept verbatim so a word whose mnemonic
+    /// cannot name every bit falls back to `.raw` without loss (F21/F29).
+    operand: u48 = 0,
 };
 
 /// §3.2.2 select: `select rd, statusReg, [MATCH], trueReg, falseReg`.
@@ -193,6 +196,8 @@ pub const Select = struct {
     match_val: Status,
     true_reg: u4,
     false_reg: u4,
+    /// Raw operand, for the `.raw` fallback (F29).
+    operand: u48 = 0,
 };
 
 /// §3.3 field slicing. `width` is a bit count, not a register width suffix.
@@ -203,6 +208,8 @@ pub const Field = struct {
     src2: u4,
     offset: u8,
     width: u8,
+    /// Raw operand, for the `.raw` fallback (F25).
+    operand: u48 = 0,
 };
 
 /// §3.4 stream engine. `stride` is the signed 40-bit byte stride of `stream.setp`;
@@ -212,6 +219,8 @@ pub const Stream = struct {
     rd: u4,
     rs1: u4,
     rs2: u4,
+    /// Raw operand, for the `.raw` fallback (F26).
+    operand: u48 = 0,
     chunk: u20,
     width: Width,
     stride: i64,
@@ -222,6 +231,9 @@ pub const Cap = struct {
     op: u8,
     rd: u4,
     rs1: u4,
+    /// Raw operand. §3.5 reserves the whole field for `cap.*`, so the decoder
+    /// rejects a non-zero value before this is ever populated (F15).
+    operand: u48 = 0,
 };
 
 /// §3.7 thread instructions. `slots` is a bitmask, one bit per slot T0-T7.
@@ -231,6 +243,8 @@ pub const Thread = struct {
     /// §3.7 defines eight slots T0-T7, so the mask needs 8 bits; a u5
     /// silently made T5-T7 unrepresentable.
     slots: u8,
+    /// Raw operand, for the `.raw` fallback (F23).
+    operand: u48 = 0,
 };
 
 /// §3.6 accelerator instructions. The opcode is the raw 0x60-0x8F byte; the
@@ -474,6 +488,13 @@ pub fn decode(word: u64) DecodeResult {
 /// The ALU operand is the same for every opcode in the group, so one helper
 /// builds the payload and the tag is the `comptime` argument.
 fn aluOrErr(comptime tag: Opcode, word: u64, op_byte: u8, rd: u4, rs1: u4, operand: u48) DecodeResult {
+    // §4: "in rs1/rs2 it is legal for SP, LR and FLAGS and a diagnostic error for
+    // PC." The assembler enforced that (parseSourceReg), the decoder did not, so
+    // `run-bin` executed a word the assembler refuses (F27:
+    // 0x124E02000995E499 -> `mul R4.w, PC, -107617127`, exit 0). The assembler
+    // is not the only entry point — the F8 rule, applied in both layers.
+    if (rs1 == 14) return .{ .err = pcAsSourceDiagnostic(word) };
+
     const raw_rs2: u4 = @truncate(operand >> 44);
     const raw_width: u4 = @truncate(operand >> 40);
     const raw_imm: u28 = @truncate(operand);
@@ -488,7 +509,9 @@ fn aluOrErr(comptime tag: Opcode, word: u64, op_byte: u8, rd: u4, rs1: u4, opera
     const width = Width.fromEncoded(raw_width) catch return .{ .err = widthDiagnostic(op_byte, raw_width) };
     const imm: ?i64 = if (raw_imm == 0) null else @as(i64, @as(i28, @bitCast(raw_imm)));
 
-    const a = Alu{ .op = op_byte, .rd = rd, .rs1 = rs1, .rs2 = raw_rs2, .width = width, .imm = imm };
+    if (raw_rs2 == 14 and raw_imm != 0) return .{ .err = pcAsSourceDiagnostic(word) };
+
+    const a = Alu{ .op = op_byte, .rd = rd, .rs1 = rs1, .rs2 = raw_rs2, .width = width, .imm = imm, .operand = operand };
     return .{ .ok = tagOf(tag, a) };
 }
 
@@ -507,6 +530,7 @@ fn selectOrErr(word: u64, rd: u4, rs1: u4, operand: u48) DecodeResult {
         .match_val = match,
         .true_reg = @truncate(operand >> 40),
         .false_reg = @truncate(operand >> 36),
+        .operand = operand,
     } } };
 }
 
@@ -551,7 +575,19 @@ fn fieldOrErr(comptime tag: Opcode, word: u64, op_byte: u8, rd: u4, rs1: u4, ope
         .src2 = @truncate(operand >> 28),
         .offset = @truncate(operand >> 40),
         .width = @truncate(operand >> 32),
+        .operand = operand,
     };
+
+    // §3.3.1 (normative): `width` is 1..=64 and `offset + width <= 64`, because a
+    // register holds exactly 64 bits. The assembler enforced this; the decoder did
+    // not, so `run-bin` accepted offset=45,width=61 (F24:
+    // 0x30512D3D00000000) where `asm` refused the same instruction. Execution was
+    // safe — the field unit cannot address past 64 bits — but a word no source
+    // line can express must not decode, or the two entry points disagree.
+    if (f.width == 0 or f.width > 64) return .{ .err = fieldWidthDiagnostic(word, f.width) };
+    if (@as(u16, f.offset) + @as(u16, f.width) > 64) {
+        return .{ .err = fieldRangeDiagnostic(word, f.offset, f.width) };
+    }
     return switch (tag) {
         .field_extract => .{ .ok = .{ .field_extract = f } },
         .field_insert => .{ .ok = .{ .field_insert = f } },
@@ -563,6 +599,15 @@ fn fieldOrErr(comptime tag: Opcode, word: u64, op_byte: u8, rd: u4, rs1: u4, ope
 /// signed 40-bit stride[39:0].
 fn streamOrErr(comptime tag: Opcode, word: u64, op_byte: u8, rd: u4, rs1: u4, operand: u48) DecodeResult {
     if (tag == .stream_setp) {
+        // §3.4: `setp` uses `rd` (the pointer register) and operand[39:0] (the
+        // signed stride) and nothing else. `rs1` and operand[47:40] had no rule
+        // requiring them to be zero, so a word carrying them decoded and the
+        // renderer dropped them (F19: 0x43BAB89E3BCCB87F lost rs1=10 and
+        // operand[47:40]=184). Contract gap + silent loss, closed on both layers.
+        if (rs1 != 0) return .{ .err = setpUnusedRegisterDiagnostic(word) };
+        if (@as(u8, @truncate(operand >> 40)) != 0) {
+            return .{ .err = setpReservedBitsDiagnostic(word) };
+        }
         const s = Stream{
             .op = op_byte,
             .rd = rd,
@@ -761,7 +806,16 @@ fn noOperandOrErrHalt(word: u64, rd: u4, rs1: u4, operand: u48) DecodeResult {
 fn threadOrErr(comptime tag: Opcode, word: u64, op_byte: u8, rs1: u4, operand: u48) DecodeResult {
     const reserved: u40 = @truncate(operand >> 8);
     if (reserved != 0) return .{ .err = threadReservedBitsDiagnostic(word) };
-    const insn = Thread{ .op = op_byte, .rs1 = rs1, .slots = @truncate(operand) };
+
+    // §3.7 names `rs1` for `thread.spawn` only ("at address `rs1`"). `join` and
+    // `yield` never define it, so a non-zero value there is a word the mnemonic
+    // cannot express and re-assembly destroyed it silently (F23:
+    // 0x91120000000000F1 lost rs1=2). Reserving it here keeps the check in the
+    // decoder as well as the assembler — the F8 two-layer rule.
+    if (tag != .thread_spawn and rs1 != 0) {
+        return .{ .err = threadUnusedRegisterDiagnostic(word) };
+    }
+    const insn = Thread{ .op = op_byte, .rs1 = rs1, .slots = @truncate(operand), .operand = operand };
     return .{ .ok = switch (tag) {
         .thread_spawn => .{ .thread_spawn = insn },
         .thread_join => .{ .thread_join = insn },
@@ -785,6 +839,84 @@ fn capOrErr(comptime tag: Opcode, word: u64, op_byte: u8, rd: u4, rs1: u4, opera
         .cap_store => .{ .cap_store = insn },
         else => .{ .cap_check = insn },
     } };
+}
+
+/// §3.4: `stream.setp` defines no `rs1`.
+fn setpUnusedRegisterDiagnostic(word: u64) Diagnostic {
+    return .{
+        .stage = "decoding this instruction",
+        .action = "decoded",
+        .word = word,
+        .operand = .{ .index = 1, .name = "first source register", .text = "non-zero" },
+        .expected = "the first-source register field to be zero, because `stream.setp` names its pointer with `rd` and carries its stride in operand[39:0] (docs/isa-encoding.md §3.4)",
+        .detail = "The instruction was not decoded; a field the text form cannot express is rejected rather than silently rewritten.",
+    };
+}
+
+/// §3.4: `stream.setp`'s operand[47:40] is reserved.
+fn setpReservedBitsDiagnostic(word: u64) Diagnostic {
+    return .{
+        .stage = "decoding this instruction",
+        .action = "decoded",
+        .word = word,
+        .operand = .{ .index = 2, .name = "reserved stream.setp field", .text = "non-zero" },
+        .expected = "operand[47:40] to be zero, because `stream.setp` gives operand[39:0] to the stride and defines nothing above it (docs/isa-encoding.md §3.4)",
+        .detail = "The instruction was not decoded; reserved means rejected when set, not ignored.",
+    };
+}
+
+/// §3.3.1: a bit count outside 1..=64.
+fn fieldWidthDiagnostic(word: u64, width: u8) Diagnostic {
+    var buf: [32]u8 = undefined;
+    const text = std.fmt.bufPrint(&buf, "{d}", .{width}) catch "an out-of-range value";
+    return .{
+        .stage = "decoding this instruction",
+        .action = "decoded",
+        .word = word,
+        .operand = .{ .index = 2, .name = "field width", .text = text },
+        .expected = "a width from 1 to 64 bits, because a register holds exactly 64 bits (docs/isa-encoding.md §3.3.1)",
+        .detail = "The instruction was not decoded; a width outside the register size is rejected rather than reinterpreted.",
+    };
+}
+
+/// §3.3.1: `offset + width` must not exceed 64 bits.
+fn fieldRangeDiagnostic(word: u64, offset: u8, width: u8) Diagnostic {
+    var buf: [64]u8 = undefined;
+    const text = std.fmt.bufPrint(&buf, "offset {d} + width {d} = {d}", .{ offset, width, @as(u16, offset) + @as(u16, width) }) catch "an out-of-range value";
+    return .{
+        .stage = "decoding this instruction",
+        .action = "decoded",
+        .word = word,
+        .operand = .{ .index = 2, .name = "field offset and width", .text = text },
+        .expected = "an offset and width whose sum is at most 64 bits, because a register holds exactly 64 bits and a field cannot extend past its end (docs/isa-encoding.md §3.3.1)",
+        .detail = "The instruction was not decoded; the assembler refuses this form, and the decoder must not accept what the assembler rejects.",
+    };
+}
+
+/// §4: index 14 (`PC`) in a source position is a diagnostic error. `SP`, `LR`
+/// and `FLAGS` are legal sources; only `PC` is not, because a read of it as an
+/// ordinary operand has no defined value.
+fn pcAsSourceDiagnostic(word: u64) Diagnostic {
+    return .{
+        .stage = "decoding this instruction",
+        .action = "decoded",
+        .word = word,
+        .operand = .{ .index = 1, .name = "first source register", .text = "PC" },
+        .expected = "a source register other than PC, because the program counter cannot be read as an ordinary operand (docs/isa-encoding.md §4); SP, LR and FLAGS are allowed",
+        .detail = "The instruction was not decoded; the assembler refuses this form, and the decoder must not accept what the assembler rejects, or a loaded image would execute an instruction no source line can express.",
+    };
+}
+
+/// §3.7: `rs1` is named for `thread.spawn` only; `join`/`yield` must have zero.
+fn threadUnusedRegisterDiagnostic(word: u64) Diagnostic {
+    return .{
+        .stage = "decoding this instruction",
+        .action = "decoded",
+        .word = word,
+        .operand = .{ .index = 1, .name = "unused source register field", .text = "non-zero" },
+        .expected = "the first-source register field to be zero, because §3.7 gives `rs1` a meaning for `thread.spawn` only and defines no source for `thread.join` or `thread.yield` (docs/isa-encoding.md §3.7)",
+        .detail = "The instruction was not decoded; a field the mnemonic cannot name is rejected rather than silently rewritten, so a loaded image cannot carry bits the text form would destroy.",
+    };
 }
 
 fn capReservedBitsDiagnostic(word: u64) Diagnostic {
@@ -968,7 +1100,10 @@ test "encode(decode(w)) == w for every opcode in the §3 map" {
         encode(.{ .stream_add = .{ .op = 0x40, .rd = 0, .rs1 = 1, .rs2 = 2, .chunk = 64, .width = .full, .stride = 0 } }),
         encode(.{ .stream_copy = .{ .op = 0x41, .rd = 1, .rs1 = 2, .rs2 = 3, .chunk = 1, .width = .l, .stride = 0 } }),
         encode(.{ .stream_fill = .{ .op = 0x42, .rd = 2, .rs1 = 3, .rs2 = 0, .chunk = 0xFFFFF, .width = .b, .stride = 0 } }),
-        encode(.{ .stream_setp = .{ .op = 0x43, .rd = 0, .rs1 = 1, .rs2 = 0, .chunk = 0, .width = .full, .stride = -8 } }),
+        // F19: `stream.setp` names its pointer with `rd` and defines no `rs1`,
+        // so this fixture's old `rs1 = 1` is now a rejected word. The encoder
+        // still exercises the field — the decode test must use a legal word.
+        encode(.{ .stream_setp = .{ .op = 0x43, .rd = 0, .rs1 = 0, .rs2 = 0, .chunk = 0, .width = .full, .stride = -8 } }),
         encode(.{ .cap_load = .{ .op = 0x50, .rd = 0, .rs1 = 1 } }),
         encode(.{ .cap_store = .{ .op = 0x51, .rd = 2, .rs1 = 3 } }),
         encode(.{ .cap_check = .{ .op = 0x52, .rd = 4, .rs1 = 5 } }),

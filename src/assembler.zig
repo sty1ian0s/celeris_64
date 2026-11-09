@@ -663,7 +663,18 @@ const LineParser = struct {
                 self.pos = saved_pos;
                 return self.failMissing(out, "first source register", "a register to compare");
             };
-            insn.rs1 = try self.parseSourceReg(lhs, out, "first source register");
+            // F29: §3.2.1's operand layout is §3.1's, so the §5 width suffix is
+            // part of the source register exactly as it is for the ALU opcodes.
+            // parseSourceReg drops the suffix, which made the width nibble
+            // unreachable from source and broke the round trip once the
+            // disassembler started emitting it.
+            {
+                const idx = try self.parseRegWithWidth(lhs, out, "first source register", &insn);
+                if (idx == 14) {
+                    return self.fail(out, "first source register", lhs, "a register other than PC, because the program counter cannot be read as an ordinary operand (docs/isa-encoding.md §4); SP, LR and FLAGS are allowed");
+                }
+                insn.rs1 = idx;
+            }
 
             const rhs = self.nextField() orelse {
                 self.text = saved_text;
@@ -702,7 +713,12 @@ const LineParser = struct {
     /// ALU second operand: a register, or an immediate (§3.1 imm28).
     fn parseAluSecond(self: *LineParser, insn: *Instruction, tok: []const u8, out: *Diagnostic) !void {
         if (looksLikeRegister(tok)) {
-            insn.rs2 = try self.parseSourceReg(tok, out, "second source");
+            // F29: keep the §5 suffix here too, for the same reason as rs1 above.
+            const idx = try self.parseRegWithWidth(tok, out, "second source", insn);
+            if (idx == 14) {
+                return self.fail(out, "second source", tok, "a register other than PC, because the program counter cannot be read as an ordinary operand (docs/isa-encoding.md §4); SP, LR and FLAGS are allowed");
+            }
+            insn.rs2 = idx;
         } else {
             insn.imm = self.parseImm(tok, out, "second source") catch |e| return e;
             if (insn.imm < -0x800_0000 or insn.imm > 0x7FF_FFFF) {
@@ -822,6 +838,12 @@ const LineParser = struct {
                 return self.failMissing(out, "byte stride", "the number of bytes to advance per step");
             };
             insn.imm = self.parseImm(stride, out, "byte stride") catch |e| return e;
+            // §3.4: `setp` names its pointer with `rd` and nothing else — no
+            // second register. A surplus operand has no field to live in and was
+            // silently discarded (F19, the F12 shape).
+            if (self.nextField()) |extra| {
+                return self.fail(out, "operand", extra, "no further operand, because stream.setp takes exactly a pointer register and a byte stride (docs/isa-encoding.md §3.4)");
+            }
             return insn;
         }
 
@@ -847,9 +869,14 @@ const LineParser = struct {
             insn.chunk = 1;
         }
 
-        if (self.op == .stream_fill) return insn;
-
         // The third operand is the offset register (§3.4: operand[47:44]).
+        //
+        // F26: this previously read `if (self.op == .stream_fill) return insn;`,
+        // returning before the offset was read. §3.4's encoding paragraph covers
+        // `stream.add`, `stream.copy` AND `stream.fill` — all three carry
+        // operand[47:44] — so `stream.fill R10.b, [R4]+468156, PC` parsed the
+        // register and threw it away, and the word round-tripped as ", R0".
+        // The renderer printed a register the parser had never accepted.
         if (self.nextField()) |off| {
             insn.rs2 = try self.parseReg(off, out, "offset register");
         }
@@ -1058,11 +1085,18 @@ const LineParser = struct {
             const op_tok = self.nextField() orelse {
                 return self.failMissing(out, "accelerator opcode byte", "the opcode byte this word carries");
             };
+            // F20/F21/F22/F23/F25/F26/F29: `.raw` is the lossless escape hatch.
+            // It began as an accelerator-only form (0x60-0x8F), but the
+            // disassembler now falls back to it for ANY opcode whose mnemonic
+            // cannot name every bit the word carries. Restricting the range here
+            // made those fallbacks unassemblable, which is strictly worse than
+            // the silent loss it replaced. Any opcode byte is now accepted; the
+            // word is data and `.raw` preserves it exactly.
             const op_val = std.fmt.parseInt(u16, op_tok, 0) catch {
-                return self.fail(out, "accelerator opcode byte", op_tok, "a number from 96 to 143");
+                return self.fail(out, "raw opcode byte", op_tok, "a byte from 0 to 255");
             };
-            if (!isAcceleratorOpcode(@intCast(op_val))) {
-                return self.fail(out, "accelerator opcode byte", op_tok, "a byte in the accelerator range 0x60 through 0x8F");
+            if (op_val > 0xFF) {
+                return self.fail(out, "raw opcode byte", op_tok, "a byte from 0 to 255");
             }
             insn.accel_opcode = @intCast(op_val);
 
@@ -1080,6 +1114,27 @@ const LineParser = struct {
             insn.rs3 = @truncate(raw >> 40);
             insn.accel_reserved = @truncate(raw >> 32);
             insn.count = @truncate(raw);
+            // F20: `.raw` carried only the 48-bit operand, so bits [55:48] —
+            // `rd` and `rs1` — were never reconstructed and the instruction
+            // re-assembled without them. A reserved accelerator word is
+            // arbitrary data; every bit must survive the round trip. The
+            // disassembler emits them as a third and fourth operand (see
+            // disassembler.zig `accelerator`), and they are optional here so
+            // pre-F20 `.dis` files that carry only two operands still parse.
+            if (self.nextField()) |rd_tok| {
+                const v = std.fmt.parseInt(u16, rd_tok, 0) catch {
+                    return self.fail(out, "raw destination register", rd_tok, "a register index from 0 to 15");
+                };
+                if (v > 15) return self.fail(out, "raw destination register", rd_tok, "a register index from 0 to 15");
+                insn.rd = @intCast(v);
+            }
+            if (self.nextField()) |rs1_tok| {
+                const v = std.fmt.parseInt(u16, rs1_tok, 0) catch {
+                    return self.fail(out, "raw first-source register", rs1_tok, "a register index from 0 to 15");
+                };
+                if (v > 15) return self.fail(out, "raw first-source register", rs1_tok, "a register index from 0 to 15");
+                insn.rs1 = @intCast(v);
+            }
             return insn;
         }
 
