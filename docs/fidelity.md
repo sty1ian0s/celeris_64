@@ -151,6 +151,16 @@ authentication`** (`src/codec.zig`).
 `benchmarks/bench.zig` compares a `stream.*` batch against an element-by-element
 loop. Both are real Celeris-64 programs executed by `src/vm.zig`.
 
+> **F32 — the two rows are not two shapes.** They are the **same** `stream.add`
+> (opcode `0x40`) with `chunk = 8` and with `chunk = 1`, and the 4-vs-11 gap is
+> `3 + 1` against `3 + chunk`. The element-by-element path is not a software loop
+> and does not avoid the fused engine; both programs contain the engine, so the
+> figure says nothing about the engine's value. It cannot be corrected without an
+> ISA change: CLS64 has no general-purpose load or store, so an unfused
+> single-element fetch-modify-write is not expressible. Full statement in
+> `docs/comparison.md` §7. The instruction counts themselves remain accurate and
+> the wording below is unchanged; what changed is what they may be taken to mean.
+
 Observed output (`~/.local/zig/zig build bench`):
 
 ```

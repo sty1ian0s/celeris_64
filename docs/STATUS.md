@@ -1204,3 +1204,84 @@ The fuzzer line is the strongest evidence the tightening is correct: **the same
 words correctly refused rose from 1,669 to 3,923.** Rejections up, fidelity
 unchanged — a fix that lost round-trip fidelity would show `identical` below
 `checked`, and one that was too permissive would leave `rejected` flat.
+
+---
+
+## F32: the benchmark's two rows are the same shape (found while adding a density axis)
+
+The task was to add an honest **encoding-density** axis — bits per operation against
+RISC-V, x86-64 and ARM64 — since density is static and needs no silicon, unlike the
+speed comparison `docs/comparison.md` correctly refuses to make.
+
+The axis could not be measured: **no ARM or RISC-V toolchain is installed** on this
+host (`aarch64-linux-gnu-gcc` and `riscv64-linux-gnu-gcc` absent; only
+`x86_64-unknown-linux-gnu` Rust std present). Stating counts from memory would have
+produced exactly the fabricated figure this repository forbids, so the axis is
+recorded as **unmeasured** rather than added.
+
+Checking the CLS64 column first turned up something worse.
+
+### The finding
+
+`docs/comparison.md` §2 and `benchmarks/bench.zig` both describe the CLS64 scalar row
+as *"an explicit software loop, one element per iteration"* and *"`chunk` separate
+load/add/store triples: no fused engine, one element each."*
+
+**Both sentences are false.** `scalarWords` emits `vm.encode(0x40, 0, 1,
+streamOperand(2, 1, .full))`. Opcode `0x40` is `stream.add` — the fused engine — and
+the batch path emits the identical word with `chunk = 8`. Neither program contains a
+software loop; neither contains an unfused triple.
+
+Both programs are `mov`, `mov`, N × `stream.add`, `halt`:
+
+| Path | N | Retired | Formula |
+|---|---|---|---|
+| batch | 1 (`chunk = 8`) | 4 | `3 + 1` |
+| scalar | 8 (`chunk = 1`) | 11 | `3 + chunk` |
+
+At `chunk = 1` both paths retire the **same 4 instructions** — the "scalar" row is the
+batch row with a smaller chunk. The published 4-vs-11 gap is therefore a property of
+call granularity *in the benchmark source*, not of the stream engine, because the
+engine is on both sides.
+
+§4's "collapse finding" does not cover this. That finding is about C and Rust, where
+two genuinely different bodies had to be kept from fusing; here there is only one
+body, issued a different number of times, and no guard could create a difference that
+the program does not contain.
+
+### Why it cannot simply be fixed
+
+The honest fix is to write the element-at-a-time path with load and store
+instructions, as the C and Rust scalar paths do. **CLS64 has no general-purpose load
+or store.** Every memory-touching opcode is `stream.add`/`copy`/`fill` (fused,
+§3.4) or `cap.load`/`cap.store` (capabilities, decode-only per §3.5 v1.12).
+`mov R5, [R4]` is rejected by the assembler; there is no memory operand form.
+
+So a single-element fetch-modify-write, expressed without the stream engine, **is not
+expressible in this ISA at all.** This is the stronger finding: the architecture's
+central claim is that `stream.*` removes loop overhead, but the comparison offered as
+evidence cannot exhibit a non-`stream.*` baseline, because the ISA provides no way to
+write one.
+
+### What was done
+
+- `docs/comparison.md` gains §7 stating the finding, the arithmetic, the toolchain
+  gap, and an explicit may-say / may-not-say list.
+- `docs/fidelity.md` §3.4 is annotated so the 4/11 figures are not read as an
+  engine-versus-loop result. The counts remain accurate; what changed is what they
+  may be taken to mean.
+- `benchmarks/bench.zig`, `workload.c` and `workload.rs` have the false claims
+  corrected at the source. The C and Rust programs were recompiled and re-run to
+  confirm they are unaffected (batch 1.89 ns / 1.72 ns, scalar 8.30 ns / 7.08 ns,
+  both equivalence checks passing).
+
+### What may and may not be said
+
+- **May be said:** the simulator retires 4 instructions for `chunk = 8` and 11 for
+  eight `chunk = 1` issues of the same instruction.
+- **May not be said:** that this is a speedup, that it is the stream engine's
+  advantage, or that it evidences §1.2's claim about loop overhead.
+- **Not measured:** encoding density against any other ISA. No toolchain.
+
+**Status: open.** Closing it needs either a load/store instruction in the contract, or
+a restatement of §2 naming the two rows for what they are.

@@ -202,6 +202,101 @@ gcc -O2 -S -o - benchmarks/crossarch/workload.c | grep -c paddq
 
 ---
 
+## 7. Limitation found while preparing an encoding-density comparison (F32)
+
+An attempt to add a fourth axis — **encoding density**, the honest static comparison
+against RISC-V, x86-64 and ARM64 that needs no silicon — was abandoned partway, and
+the reason is a finding about this document rather than about those architectures.
+
+### 7.1 The measurement was not possible here
+
+No ARM or RISC-V toolchain is installed on this host (`aarch64-linux-gnu-gcc` and
+`riscv64-linux-gnu-gcc` are both absent; only `x86_64-unknown-linux-gnu` Rust std is
+present). Instruction counts for those ISAs therefore could not be **measured**, and
+stating them from memory would have been exactly the fabricated figure this repository
+forbids. The axis is not wrong — it is unmeasured, and it is recorded as unmeasured.
+
+### 7.2 The scalar shape in §2 is not the shape §2 describes
+
+More seriously: checking this document's own claim about the CLS64 axis found that
+**the two rows are not two shapes of the same work.**
+
+§2 says:
+
+> **scalar** — eight separate calls, one element each, each paying its own call and
+> loop overhead. This is the shape CLS64's element-by-element path also pays.
+
+and `benchmarks/bench.zig` says:
+
+> Element-by-element path: an explicit software loop, one element per iteration.
+> ... `chunk` separate load/add/store triples: no fused engine, one element each.
+
+**Neither sentence is true of the code.** `scalarWords` emits `vm.encode(0x40, 0, 1,
+streamOperand(2, 1, .full))` — opcode `0x40` is `stream.add`, *the fused engine*, with
+`chunk = 1`. The batch path emits the same `0x40` with `chunk = 8`. There is no
+software loop in either program and no unfused load/add/store triple in either; the
+words are identical except for the chunk field.
+
+So the 4-vs-11 difference measures **how many times the same instruction is issued**,
+and it is pure arithmetic. Both programs are `mov`, `mov`, then N copies of
+`stream.add`, then `halt`:
+
+| Path | N | Retired | Formula |
+|---|---|---|---|
+| batch | 1 (`chunk = 8`) | 4 | `3 + 1` |
+| scalar | 8 (`chunk = 1` each) | 11 | `3 + chunk` |
+
+At `chunk = 1` the two paths retire the **same** 4 instructions, which is the clearest
+statement of the problem: the "scalar" path is the batch path with a smaller chunk. The
+difference is a property of the *call granularity in the benchmark source*, not of the
+stream engine, because the engine is used identically in both programs.
+
+### 7.3 Why the "collapse finding" in §4 does not cover this
+
+§4 records that C and Rust collapse two shapes into identical SIMD loops unless
+`noinline` and a volatile element count keep them apart, and that finding is real and
+was re-verified. It does not apply here: the C and Rust programs have two genuinely
+different bodies, while the two CLS64 programs have **one** body issued a different
+number of times. §4's guards make the C/Rust distinction real. Nothing makes the CLS64
+distinction real, because there is no second shape in the program.
+
+### 7.4 Why a true scalar shape cannot currently be written
+
+The honest fix would be to write the element-at-a-time path using load and store
+instructions, as the C and Rust scalar paths do. **CLS64 has no general-purpose load or
+store instruction.** Every memory access in the §3 opcode map is one of:
+
+| Opcode | Mnemonic | Memory role |
+|---|---|---|
+| `0x40` | `stream.add` | fused load/add/store over a chunk |
+| `0x41` | `stream.copy` | fused load/store over a chunk |
+| `0x42` | `stream.fill` | fused store of a scalar over a chunk |
+| `0x50` | `cap.load` | loads a **capability**, decode-only (§3.5, v1.12) |
+| `0x51` | `cap.store` | stores a **capability**, decode-only |
+
+There is no `load`, no `store`, and no memory operand form: `mov R5, [R4]` is rejected
+by the assembler. So a single-element fetch-and-replace, expressed without the stream
+engine, **is not expressible in this ISA at all.**
+
+That is a contract-level gap, not a benchmark bug, and it is the stronger finding: the
+architecture's central claim is that `stream.*` removes loop overhead, but the
+comparison offered as evidence cannot exhibit a non-`stream.*` baseline because the ISA
+provides no way to write one.
+
+### 7.5 What may and may not be said
+
+- **May be said:** the simulator retires 4 instructions for a `chunk = 8` `stream.add`
+  and 11 for eight `chunk = 1` issues of the same instruction.
+- **May not be said:** that this is a speedup, that it is the stream engine's advantage,
+  or that it evidences §1.2's claim about loop overhead. The engine is on both sides.
+- **Not measured:** encoding density against RISC-V, x86-64 or ARM64; no toolchain.
+
+**Status: open.** Closing this needs either a load/store instruction in the ISA (a
+contract change) or a restatement of §2 that names the two rows for what they are —
+the same instruction at two granularities.
+
+---
+
 **Status:** measurement notes, not a performance claim. See
 `docs/fidelity.md` for the repository-wide fidelity rules these tables obey, and
 `docs/isa-encoding.md` §8 for the model-vs-silicon distinction that governs the
