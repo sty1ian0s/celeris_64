@@ -1609,6 +1609,35 @@ something that is not there.
   but neither the word nor §3.6 names the output address or its size. `rd`, `rs1` and
   `count` are all already spoken for.
 
+And one ambiguity that reaches **all thirteen** operations, found during
+implementation by the teammate wiring this (their analysis, verified here):
+
+- **`count`'s source and unit are both undefined for a caller that omits `count=N`.**
+  §3.6 line 490 says: *"`count[31:0]` — element or byte count, unsigned. `0` means
+  'derive the count from the destination register', which is the form the assembler
+  emits when no count is written."* That sentence is unconditional — it applies to
+  every accelerator op, and the assembler's `takes_count = false` merely means the
+  *text* may not spell `count=N`. Two things are then missing:
+
+  - **Source.** "Derive from the destination register" is the only occurrence of
+    "derive" in the contract, and it never says what `rd` holds at that moment.
+    (`R0` is not `ZERO`: `registers.zig:90` records index 0 as "a real, writable
+    register", with `ZERO` a separate system register — so `rd = R0` is ordinary
+    and the ambiguity is not resolved by the hardwired-zero rule.)
+  - **Unit.** The same table calls the field an "element or byte count", then says
+    "element count" for the fft rows, "elements **per stream**" for `transform`, and
+    the codec ops are byte-oriented. For fft the difference is not cosmetic: a
+    complex element is 16 bytes, so a 16-vs-256 reading of one field is a 16×
+    error in a buffer length.
+
+  There *is* precedent for reading `rd` as an input — `stream.setp` (`0x42`/`0x43`)
+  reads it (`src/vm.zig:402`, `408`, `418`) — but it does not transfer. `setp`'s `rd`
+  genuinely *names* the pointer register it updates, so its old value is the operand.
+  For an accelerator op `rd` is the **result** register, so treating it as the count
+  source imposes a calling convention in which a program must pre-load its own
+  result register with a length. That is a contract decision, and the contract has
+  not made it.
+
 ### Why this is a finding worth recording rather than a detail to paper over
 
 The obvious way to make all 13 execute is to pick a convention — say `n` comes from
@@ -1627,19 +1656,32 @@ disassembler and any future backend would not see it.
 ### What may and may not be said
 
 - **May be said:** the §3.6 table is complete about *operand names* and incomplete
-  about *address and shape arithmetic*; four of the thirteen operations cannot be
-  executed from the information the encoding carries.
+  about *address and shape arithmetic* and about *the count's source and unit*; on
+  the strict reading, **none** of the thirteen operations can be executed from the
+  information the encoding carries.
 - **May be said:** the accelerator range assembles, disassembles and round-trips
   byte-identically — verified, including `matrix.det` and `codec.compress`. The gap
   is execution semantics, not encoding.
 - **May not be said:** that the accelerators "work". They do not execute. It is also
   not true that they are undecodable — `decoder.decode` returns a populated
   `.accelerator` payload for every one of them.
+- **May not be said:** that `codec.fnv1a` is the "easy one that obviously works". It
+  was the Lead's first pick for a proof-of-wiring test, on the assumption that a
+  one-input one-result op has no shape problem. It has the count problem: nothing
+  states where fnv1a's byte length comes from. That assumption is recorded here
+  because it is the exact mistake this finding is about — reaching for the
+  convention that makes the code run.
 
 ### What closing it needs
 
-A §3.6 amendment stating, per operation, where each matrix dimension and each output
-buffer comes from — the same kind of amendment 1.1 already made for the operand
-layout. That is a contract change on the scale of the one F32 needed, and like F32 it
-should be made in the contract rather than in whichever component hits the problem
-first.
+A §3.6 amendment stating, per operation: where each matrix dimension comes from,
+where each output buffer comes from, and what `count = 0` means (which register, and
+in what unit) — the same kind of amendment 1.1 already made for the operand layout.
+That is a contract change on the scale of the one F32 needed, and like F32 it should
+be made in the contract rather than in whichever component hits the problem first.
+
+Until then the correct simulator behaviour is to **refuse all thirteen** with a
+plain-language diagnostic that names the missing rule, and to keep a *reserved*
+opcode byte (`0x60`–`0x8F` with no table row) faulting differently from a
+*defined but unexecutable* one. The two are different findings and should not read
+the same.
