@@ -31,7 +31,7 @@ your counts differ, yours are correct and this table is stale.
 rm -rf .zig-cache zig-out
 ~/.local/zig/zig build              # -> exit 0
 ~/.local/zig/zig build test --summary all
-# -> Build Summary: 39/39 steps succeeded; 452/452 tests passed
+# -> Build Summary: 49/49 steps succeeded; 555/555 tests passed
 
 # A single module's tests, independently of the build graph.
 ~/.local/zig/zig test src/<module>.zig
@@ -41,7 +41,7 @@ rm -rf .zig-cache zig-out
 ```
 
 Observed on the tree at the time of writing: `zig build` exits 0, and
-`zig build test` reports **39/39 steps, 452/452 tests passed, exit 0**.
+`zig build test` reports **49/49 steps, 555/555 tests passed, exit 0**.
 
 ### Toolchain facts
 
@@ -147,6 +147,14 @@ Auditable by test: **`MODEL LIMITS: these are integrity checks, not
 authentication`** (`src/codec.zig`).
 
 ### 3.4 Benchmark figures are instruction counts in a model
+
+**A second comparison now exists and is measured differently.** `zig build
+crossarch` executes real machine code for CLS64, RISC-V RV64I, AArch64 and x86-64 in
+one shared loop, reporting retired instructions and encoded bytes. All four columns
+are produced the same way, which §3's tables above are not. It still reports **no**
+timing quantity: cycles, time and frequency are absent because assigning them would
+require inventing a microarchitecture, and CLS64's number would come from that same
+invention. See `docs/comparison.md` §8 for the table and its caveats.
 
 `benchmarks/bench.zig` compares a `stream.*` batch against an element-by-element
 loop. Both are real Celeris-64 programs executed by `src/vm.zig`.

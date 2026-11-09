@@ -13,7 +13,7 @@ See [docs/fidelity.md](docs/fidelity.md) for the per-subsystem ledger.
 | Check | Result |
 |-------|--------|
 | `zig build` | exit 0, produces `zig-out/bin/celeris64` |
-| `zig build test` | **39/39 steps, 452/452 tests, exit 0** (20 roots, summed) |
+| `zig build test` | **49/49 steps, 555/555 tests, exit 0** (24 roots, summed) |
 | `zig build bench` | exit 0, prints clearly-labelled simulated counts |
 | `zig build audit` | every reserved field the contract declares is rejected — 9/9 enforced, 1 declared exemption, exit 0 |
 | `zig build live-check` | re-derives the verifier's 232 recorded facts from the current binary; catches snapshot drift |

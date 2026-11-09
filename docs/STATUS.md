@@ -18,7 +18,7 @@ and apt-installed RTL tools are out of reach.
 ## Verified working
 
 `~/.local/zig/zig build` -> exit 0.
-`~/.local/zig/zig build test` -> **39/39 steps succeeded, 452/452 tests passed, exit 0**.
+`~/.local/zig/zig build test` -> **49/49 steps succeeded, 555/555 tests passed, exit 0**.
 `~/.local/zig/zig build bench` -> exit 0.
 
 | Check | Command | Result |
@@ -197,7 +197,7 @@ Current, verified state. Superseded claims are removed rather than left to misle
 ```sh
 rm -rf .zig-cache zig-out
 ~/.local/zig/zig build          # exit 0
-~/.local/zig/zig build test     # 39/39 steps, 452/452 tests, exit 0
+~/.local/zig/zig build test     # 49/49 steps, 555/555 tests, exit 0
 ~/.local/zig/zig build bench    # exit 0
 ```
 
@@ -1285,3 +1285,90 @@ write one.
 
 **Status: open.** Closing it needs either a load/store instruction in the contract, or
 a restatement of §2 naming the two rows for what they are.
+
+---
+
+## F33: four ISAs executed by one measurement loop
+
+**What was asked:** extend the VM so all architectures run under the same clock, for
+apples-to-apples comparison.
+
+**What was done, and the one part of that request that was declined.** The VM was
+extended to execute real machine code for three more ISAs — RISC-V RV64I, AArch64 and
+x86-64 — inside one shared counting loop, so that CLS64's column is now measured the
+same way as the others instead of being a counter compared against wall-clock
+nanoseconds. The "same clock" part was **not** implemented, and that was a deliberate
+refusal: assigning a cycle cost per instruction would mean inventing a
+microarchitecture for CPUs that are not present, and CLS64's own number would come
+from the same invention. The result would look like a fair comparison while being a
+statement about the model. `src/isaharness.zig` reports retired instructions and
+encoded bytes, has no field for any timing quantity, and a test fails if one is added.
+
+```
+zig build crossarch
+```
+
+| ISA | shape | retired | code bytes | bytes/insn |
+|---|---|---|---|---|
+| Celeris-64 CLS64 | batch | 4 | 32 | 8.00 |
+| RISC-V RV64I | batch | 54 | 216 | 4.00 |
+| AArch64 A64 | batch | 60 | 240 | 4.00 |
+| x86-64 | batch | 52 | 167 | 3.21 |
+| Celeris-64 CLS64 | scalar | 11 | 88 | 8.00 |
+| RISC-V RV64I | scalar | 55 | 220 | 4.00 |
+| AArch64 A64 | scalar | 61 | 244 | 4.00 |
+| x86-64 | scalar | 60 | 207 | 3.45 |
+
+Every program's resulting memory is compared against the others, so a program that
+ran but computed the wrong thing cannot appear as an equal participant.
+
+### New code, and how it is verified
+
+Roughly 1,800 lines of new decoder and interpreter code across five files. That is a
+large amount of new risk, so none of it is verified against itself:
+**`llvm-mc` is the oracle.** The encodings pasted into the tests were produced by
+LLVM's integrated assembler and checked byte-for-byte, for all three ISAs.
+
+This caught **three real bugs that every self-consistency test had passed**:
+
+1. **RISC-V and AArch64 immediates** were sign-extended by shifting up to put the
+   sign bit at bit 31 and then never shifted back. A `-8` branch offset decoded as
+   `4194304`. Nothing in the ISA-execution tests noticed, because the same wrong
+   understanding was in both the encoder and the decoder; only the oracle's
+   independent bytes exposed it.
+2. **x86-64 opcode `0xC7`** was grouped with the group-1 ALU opcodes. It is group 11
+   — `MOV r/m, imm` — and its `reg` field is an opcode extension, not an ALU
+   selector. `movq $5, %rax` therefore executed as an `ADD` and stored 5 instead of
+   moving it.
+3. **x86-64 SIB addressing** read a `disp32` for every `mod == 0` SIB operand. A
+   `disp32` is present only when the SIB base field is 5, so the decoder consumed
+   four bytes that did not exist and corrupted every following instruction.
+
+Each is now pinned by a test that fails when the bug is reintroduced by mutation.
+The store path was mutation-tested: replacing the stored register with the wrong one
+makes both the unit test and the oracle test fail.
+
+Two further bugs were found in the *programs* rather than the decoders, by the
+memory-equality check: an x86-64 `jne` with `rel8 = -15` where `-18` was correct
+(which ran the loop 11 times instead of 8), and a RISC-V `addi` used to load the
+address `4096`, which exceeds `addi`'s signed 12-bit immediate — the encoder
+truncated it to 0 and the program streamed over its own code. The second is the same
+class as F17.
+
+### A caveat that must travel with the table
+
+CLS64's "scalar" row is **the same instruction at a lower granularity**, not a
+second shape — §7's F32 finding. The other three ISAs' scalar rows are genuine
+loops. **The CLS64 scalar row is therefore not comparable to theirs**, and putting it
+in the same table invites exactly the reading that F32 forbids. It is included for
+completeness and labelled in the report.
+
+### Verification
+
+```
+zig build test --summary all  -> 49/49 steps, 555/555 tests, exit 0  (clean rebuild)
+zig build crossarch           -> 8 rows, all computing the correct result
+llvm-mc oracle tests          -> 3 ISAs, encodings checked byte-for-byte
+```
+
+Test count rose from 453 to 555: 43 in `crossarch.zig` plus 59 in the four ISA roots.

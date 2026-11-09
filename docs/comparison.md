@@ -297,7 +297,108 @@ the same instruction at two granularities.
 
 ---
 
-**Status:** measurement notes, not a performance claim. See
+## 8. Four ISAs, one measurement loop (F33)
+
+Sections 1–7 compare CLS64 against C and Rust *wall-clock times*, which is not a
+like-for-like comparison and never could be: one column is nanoseconds on real
+silicon, the other is a counter in this repository's own simulator. §7 records that
+the density axis could not be added because no ARM or RISC-V toolchain is
+installed.
+
+**The rows below are different.** All four are produced by the *same* execution
+loop running *real machine code*, so the counts are commensurable in a way §3's
+were not.
+
+```sh
+zig build crossarch
+```
+
+| ISA | shape | retired | code bytes | bytes/insn |
+|---|---|---|---|---|
+| Celeris-64 CLS64 | batch | **4** | 32 | 8.00 |
+| RISC-V RV64I | batch | 54 | 216 | 4.00 |
+| AArch64 A64 | batch | 60 | 240 | 4.00 |
+| x86-64 | batch | 52 | 167 | **3.21** |
+| Celeris-64 CLS64 | scalar | 11 | 88 | 8.00 |
+| RISC-V RV64I | scalar | 55 | 220 | 4.00 |
+| AArch64 A64 | scalar | 61 | 244 | 4.00 |
+| x86-64 | scalar | 60 | 207 | **3.45** |
+
+Same workload as §2: add 5 to each of 8 contiguous `u64` elements. Every program's
+resulting memory is compared against the others, so a program that ran but computed
+something else cannot appear as an equal participant.
+
+### 8.1 What is measured, and what still is not
+
+**Measured:** retired instructions, and the bytes those instructions occupied as
+encoded. Both are properties of the program.
+
+**Not measured — and this is deliberate:** cycles, time, clock frequency,
+throughput, speed. Assigning a cycle cost per instruction would mean inventing a
+microarchitecture for CPUs that are not present in this repository. The invention
+would be the author's design choice, and CLS64's own number would come from the same
+invention — so the result would look like a fair fight while being a statement about
+the model. `src/isaharness.zig` therefore has no field of any kind for a timing
+quantity, and a test fails if one is added.
+
+**§3's rule still applies to §3's table.** The batch/scalar *ratios* in §3.1 are
+timing ratios and the ones here are count ratios; they are still not divisible.
+
+### 8.2 What the numbers may and may not be taken to mean
+
+- **May be said:** for this workload, CLS64 retires 4 instructions where RISC-V
+  retires 54, AArch64 60 and x86-64 52.
+- **May not be said:** that CLS64 is 13× faster. Nothing here is a speed
+  measurement. An instruction in one ISA is not an instruction in another: one
+  `stream.add` moves 8 elements where one `ld` moves 1.
+- **May be said:** x86-64 has the densest encoding here (3.21 bytes/instruction),
+  because it is the only variable-length ISA in the set and its short forms are
+  genuinely short.
+- **May not be said:** that x86-64 is therefore better. Density is one axis, and
+  this table measures no other.
+- **A real caveat:** the four programs were written *by hand* for this repository,
+  not emitted by an optimising compiler. A different hand-written program would
+  produce different counts for the same ISA. The C and Rust columns in §3 exist
+  precisely because hand-written assembly is not what anyone ships.
+
+### 8.3 The F32 caveat applies to CLS64's rows
+
+§7 records that CLS64's "batch" and "scalar" programs are the **same instruction at
+two granularities**, not two shapes. That remains true here: the CLS64 scalar row is
+`stream.add` with `chunk = 1` issued eight times, not an unfused load/add/store
+loop. RISC-V, AArch64 and x86-64's scalar rows *are* genuine loops. **The CLS64
+scalar row is therefore not comparable to the other scalar rows**, and the honest
+fix is still the one §7 names: a load/store instruction in the ISA, or a restatement
+of §2.
+
+### 8.4 How the executors are verified
+
+Three new decoders were written for this section, which is a large amount of new
+code and therefore a large amount of new risk. They are checked **against an
+independent implementation**, not against themselves:
+
+```sh
+# The encodings in the tests came from this, and are pasted verbatim:
+echo "addq %rcx, %rax" | llvm-mc -triple=x86_64  -show-encoding
+echo "add x0, x1, x2"  | llvm-mc -triple=aarch64 -show-encoding
+echo "add a0, a1, a2"  | llvm-mc -triple=riscv64 -show-encoding
+```
+
+A decoder and an encoder that share a wrong idea of an encoding agree with each
+other perfectly and with no real tool. Three real bugs were found this way that all
+self-consistency tests had passed:
+
+1. **RISC-V immediates** were sign-extended by shifting up but never back, so a
+   `-8` branch offset decoded as `4194304` and sent the PC far outside the image.
+   The same bug was present in the AArch64 decoder.
+2. **x86-64 `0xC7`** was grouped with the group-1 ALU opcodes, so `movq $5, %rax`
+   executed as an `ADD`.
+3. **x86-64 SIB addressing** read a `disp32` for every `mod == 0` SIB operand,
+   swallowing the following instruction's bytes.
+
+Each is recorded in `docs/STATUS.md` as F33 with the mutation that catches it.
+
+**Status:** measured, and still not a performance claim. See
 `docs/fidelity.md` for the repository-wide fidelity rules these tables obey, and
 `docs/isa-encoding.md` §8 for the model-vs-silicon distinction that governs the
 CLS64 column.
