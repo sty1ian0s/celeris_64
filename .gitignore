@@ -2,3 +2,5 @@
 zig-out/
 zig-pkg/
 *.o
+# Verilator writes its generated C++ next to the testbench unless -Mdir is set.
+obj_dir/

@@ -17,6 +17,10 @@ const diag = @import("diagnostics.zig");
 
 pub const Diagnostic = diag.Diagnostic;
 
+/// Re-exported so a test root can reach both tools through one module. They
+/// share diagnostics.zig, and Zig refuses to put one file in two modules.
+pub const disassembler = @import("disassembler.zig");
+
 /// Operand width suffix, docs/isa-encoding.md §5.
 ///
 /// Declared here rather than imported from registers.zig so this module does not

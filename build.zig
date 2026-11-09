@@ -23,9 +23,18 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    // Named handle for the tooling graph. assembler and disassembler share
+    // diagnostics.zig, and Zig forbids one file belonging to two modules, so
+    // the fuzzer imports the tooling root as a single module and re-exports
+    // both — the same reason `vm_mod` roots at vm.zig rather than main.zig.
+    const tooling_mod = b.createModule(.{
+        .root_source_file = b.path("src/assembler.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     const exe = b.addExecutable(.{ .name = "celeris64", .root_module = src_mod });
     b.installArtifact(exe);
-
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
     b.step("run", "Run the Celeris-64 CLI").dependOn(&run_cmd.step);
@@ -66,6 +75,19 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+
+    // Differential round-trip fuzzer. Roots at tests/, so it needs both tools as
+    // named imports. It asserts the contract's `asm -> dis -> asm` byte-identity
+    // claim on pseudo-random words rather than on the fixtures that were written
+    // to satisfy it.
+    const fuzz_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/roundtrip_fuzz.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    fuzz_tests.root_module.addImport("tooling", tooling_mod);
 
     // The dedicated hardware primitives get their own root. They import only
     // memory.zig, so this root keeps their inline tests running (including the
@@ -188,6 +210,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(field_tests).step);
     test_step.dependOn(&b.addRunArtifact(select_tests).step);
     test_step.dependOn(&b.addRunArtifact(decoder_tests).step);
+    test_step.dependOn(&b.addRunArtifact(fuzz_tests).step);
     test_step.dependOn(&b.addRunArtifact(bench_tests).step);
     test_step.dependOn(&b.addRunArtifact(verifier_tests).step);
 

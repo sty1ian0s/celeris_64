@@ -30,6 +30,12 @@ const assembler_accel = @import("assembler.zig");
 pub const Diagnostic = diag.Diagnostic;
 pub const Instruction = decoding.Instruction;
 
+/// Re-exported so a test root can pin the assembler's encoder against this one.
+/// The two are independent implementations of the same §3 layouts; the
+/// round-trip fuzzer only exercises the assembler's, so they need an explicit
+/// agreement check.
+pub const encode = decoding.encode;
+
 /// Renders `word` as one line of Celeris-64 assembly.
 ///
 /// On an undecodable word the diagnostic from the decoder is returned unchanged,
