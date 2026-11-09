@@ -650,8 +650,27 @@ module stream_tb
     su_signed_view = 1'b0;
     settle();
     check64("§3.2.1 (-1 vs 1) UNSIGNED == UNSIGNED_GREATER (4)", {60'd0, su_status}, 64'd4);
-    // And they must not be the same value.
-    check1 ("§3.2.1 signed view != unsigned view", 1'b1, 1'b1);
+    // And they must not be the same value. This was previously written as
+    // `check1(..., 1'b1, 1'b1)` — a tautology that passes no matter what the DUT
+    // does, so it inflated the assertion count without testing anything. The two
+    // statuses are captured and compared for real (F31).
+    su_signed_view = 1'b1;
+    settle();
+    begin
+      logic [3:0] signed_status;
+      logic [3:0] unsigned_status;
+      signed_status = su_status;
+      su_signed_view = 1'b0;
+      settle();
+      unsigned_status = su_status;
+      checks++;
+      if (signed_status === unsigned_status) begin
+        failures++;
+        $display("FAIL: §3.2.1 signed and unsigned views returned the SAME status %0d", signed_status);
+      end
+      su_signed_view = 1'b1;
+      settle();
+    end
 
     //-----------------------------------------------------------------------
     // §3.2.2 select is a bitwise merge, no branch.
@@ -824,7 +843,19 @@ module stream_tb
     // §3.4: add and copy must have driven the read port at least once by now.
     check1("§3.4 read strobe observed during add/copy", rd_strobe_seen_q, 1'b1);
     // §3.4: a chunk above this engine's walk limit is refused, not truncated.
-    check1("§3.4 oversized chunk reports chunk_too_large", se_chunk_too_large || 1'b1, 1'b1);
+    //
+    // This was previously `check1(..., se_chunk_too_large || 1'b1, 1'b1)` — a
+    // tautology that is always 1, so it passed whatever the DUT did and merely
+    // inflated the assertion count. F31. It is now driven for real: an oversized
+    // chunk is issued and three independent things are checked — the refusal
+    // signal is high, no byte of memory changed, and the pointer did not move.
+    reset_duts();
+    mem_fill(8'h5A);
+    snapshot(snap);
+    run_chunk(OP_STREAM_FILL, 20'hFFFFF, WIDTH_FULL, '0, 64'h11, '0, '0, '0);
+    check1 ("§3.4 oversized chunk reports chunk_too_large", se_chunk_too_large, 1'b1);
+    check_bytes("§3.4 oversized chunk writes nothing", snap);
+    check64("§3.4 oversized chunk leaves the pointer unmoved", ptr_model, 64'd0);
 
     $display("checks run: %0d, failures: %0d", checks, failures);
     if (failures == 0) begin

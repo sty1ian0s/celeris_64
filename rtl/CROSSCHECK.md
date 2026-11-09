@@ -35,7 +35,7 @@ Everything below was run on a quiescent tree. Commands and output are pasted ver
 the right answer. A design that adds when it should subtract lints perfectly.
 
 So the RTL is checked against the one component in this repository with independent evidence
-behind it: the Zig simulator (`src/vm.zig` et al.), which has a 260+ case test suite and a
+behind it: the Zig simulator (`src/vm.zig` et al.), which has a 452-case test suite and a
 separate adversarial verifier. The same instruction **words** are driven through both, and the
 resulting register files are compared.
 
@@ -155,10 +155,17 @@ alone, and is labelled there.
 
 | ID | Program | `.asm` source | Words |
 |---|---|---|---|
-| P1 | §5 sub-width zero-extension | `/tmp/p1_zeroext.asm` | 7 |
-| P2 | §3.1 ALU immediate (ten ops) | `/tmp/p2_aluimm.asm` | 11 |
-| P3 | §3.0 jump / call / ret (LR) | `/tmp/p3_callret.asm` | 9 |
-| P4 | §3.4 `stream.add` | `/tmp/p4x.asm` | 5 |
+| P1 | §5 sub-width zero-extension | `tests/crosscheck/p1_zeroext.asm` | 7 |
+| P2 | §3.1 ALU immediate (ten ops) | `tests/crosscheck/p2_aluimm.asm` | 11 |
+| P3 | §3.0 jump / call / ret (LR) | `tests/crosscheck/p3_callret.asm` | 9 |
+| P4 | §3.4 `stream.add` | `tests/crosscheck/p4x.asm` | 5 |
+
+**These four files moved into the repository after this document was written.** They
+previously lived at `/tmp/p1_zeroext.asm` and siblings — outside version control, in a
+directory that is cleared on reboot. They survived by luck, not by design, and a document
+citing an unreproducible path is not evidence. `tests/roundtrip_fuzz.zig` now assembles
+all four and asserts every word round-trips, so a future edit that breaks them fails the
+build rather than silently invalidating this method.
 
 ---
 
@@ -187,7 +194,7 @@ PASS: all 159 core vectors matched (simulation only; RTL is NOT timing-closed, N
 
 ### 4.2 P1 — §5 sub-width zero-extension
 
-Zig reference (`celeris64 trace /tmp/p1_zeroext.asm`, final state):
+Zig reference (`celeris64 trace tests/crosscheck/p1_zeroext.asm`, final state):
 
 ```
   000032  mov R0, -1        # R0 <- 0xffffffffffffffff
@@ -254,7 +261,7 @@ uses — so the two cannot drift apart.
 
 ### 4.5 P4 — §3.4 `stream.add`
 
-Assembler-authored source (`/tmp/p4x.asm`), so the words are exactly what `celeris64 asm`
+Assembler-authored source (`tests/crosscheck/p4x.asm`), so the words are exactly what `celeris64 asm`
 emits:
 
 ```
@@ -270,7 +277,7 @@ halt
 000032 0100000000000000
 ```
 
-Zig: `program "/tmp/p4x.bin" halted after 5 simulated instructions.`
+Zig: `program "tests/crosscheck/p4x.bin" halted after 5 simulated instructions.`
 
 RTL:
 ```
@@ -399,6 +406,18 @@ Implementing it from an ambiguous reading would put a guess in a writeback path.
 `rtl/stream_engine.sv` walks **at most 8 elements per pass** (`WALK_LIMIT`, a 3-bit counter),
 while §3.4's `chunk` field is 20 bits — up to 1,048,575 elements. A larger chunk is refused
 loudly on `chunk_too_large_o`; it is **never** silently truncated.
+
+> **Correction (F31).** Until this note was added, the sentence above was supported by a
+> tautology. The testbench check that was supposed to establish it read
+> `check1("§3.4 oversized chunk reports chunk_too_large", se_chunk_too_large || 1'b1, 1'b1)` —
+> `x || 1'b1` is always true, so the check passed whatever the DUT did, and it counted toward
+> the `314/314` figure quoted elsewhere in this file. It is now driven for real:
+> `chunk = 20'hFFFFF` is issued and three things are asserted — the refusal signal is high, no
+> memory byte changed, and the pointer did not move. **Measured after the fix: `stream_tb` runs
+> 348 assertions, 0 failures, exit 0** (`alu_tb` 80/80, `core_tb` 159/159 likewise re-run and
+> measured). The replacement was mutation-tested: forcing the checked signal to `1'b0` makes the
+> run report `FAIL: §3.4 oversized chunk reports chunk_too_large: got 0 expected 1` and exit 1,
+> so the assertion can now fail. The old tautology could not.
 
 **No reader may infer from "the four programs agreed" that the RTL implements §3.4's full chunk
 range. It does not.** Four of the five chunks used here are 4 and 8 elements, chosen to stay
