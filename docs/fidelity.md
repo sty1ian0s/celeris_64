@@ -342,8 +342,29 @@ works: `decoder.zig:407` routes 0x60–0x8F through `isAcceleratorByte` into a r
   `printf 'codec.enc R0, R1\nhalt\n' > a.asm && celeris64 asm a.asm a.bin` →
   `error: … Expected an instruction mnemonic from the Celeris-64 opcode map`.
 
+**Correction (v1.18) — both bullets above are now stale, and the round-trip is
+stronger than this section claims.** They were accurate when written; v1.16 and
+§3.6 Amendment 1.1 closed both. Verified end to end rather than inferred — this
+source:
+
+```
+matrix.det R1, R2
+matrix.transform R3, R4, count=8
+fft.forward R5, R6, count=16
+codec.fnv1a R7, R8
+codec.compress R9, R10, count=32
+halt
+```
+
+assembles to 48 bytes, disassembles back to byte-identical text, and that text
+re-assembles to a **byte-identical image** (`cmp` clean). The accelerator range is
+therefore round-trippable as re-assemblable *text*, not merely at the word level,
+and the assembler does accept accelerator mnemonics. What remains true is
+narrower, and is the live gap: the range is still **not executed**.
+
 The distinction matters because "cannot be decoded" invites the reader to assume
-the decoder is incomplete, when the gap is in the textual layer.
+the decoder is incomplete, when the gap is in the textual layer — but that gap has
+since closed, so the distinction is now history rather than a live caveat.
 
 ### 6.3 This is a single-threaded interpreter
 
