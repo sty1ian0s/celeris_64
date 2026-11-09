@@ -8,9 +8,9 @@ running something; claims that were not observed are marked as such.
 ## 1. Repository state
 
 ```
-HEAD         433d950  feat(examples): the eighth kernel lands as `signed_max`, closing F41
+HEAD         2bcd250  feat(examples): stream_copy_sum — the suite's first CLS64 WIN
 remote       origin/main, IN SYNC after the push below (was b081f6f)
-working tree CLEAN (at 433d950)
+working tree CLEAN (at 2bcd250)
 ```
 
 Four commits landed this session, in this order:
@@ -23,6 +23,8 @@ Four commits landed this session, in this order:
 | `b081f6f` | `docs(status)`: F41 — correct the shift semantics |
 | `cfe6a9b` | `docs(handoff)`: third-session handoff |
 | `433d950` | `feat(examples)`: **the eighth kernel lands as `signed_max` (closes F41)** |
+| `2067d7c` | `fix(docs)`: the "six example kernels" count was wrong in four places, and nothing checked it |
+| `2bcd250` | `feat(examples)`: **`stream_copy_sum` — the suite's first CLS64 WIN (F42)**, + name-based test lookup |
 
 ### Gates, all run on a cold cache at `433d950`
 
@@ -31,7 +33,7 @@ rm -rf .zig-cache && ~/.local/zig/zig build test --summary all
   -> Build Summary: 53/53 steps succeeded; 1016/1016 tests passed   exit 0
 
 bash tests/mulout_e2e.sh           -> 6/6 checks passed        exit 0
-~/.local/zig/zig build examples    -> 69 "simulated" lines, 8 kernels x 4 ISAs
+~/.local/zig/zig build examples    -> 9 kernels x 4 ISAs, all byte-equivalent
 ~/.local/zig/zig build audit       -> 9/9 enforcement points, all 9 rejected when set
 ~/.local/zig/zig build live-check  -> all 232 recorded facts still reproduce
 ~/.local/zig/zig build crossarch   -> 8 rows, no !! warnings
@@ -231,8 +233,8 @@ test really exercises the shipped programs rather than only fixtures.
 
 ## 6. What remains
 
-1. **More example kernels** — the eighth (`signed_max`) is delivered; see §4. The suite now
-   runs 8 kernels x 4 ISAs. Further breadth is welcome, and §4's rule applies to every one
+1. **More example kernels** — nine are delivered (`signed_max`, then `stream_copy_sum`);
+   see §4 and F42. The suite runs 9 kernels x 4 ISAs. Further breadth is welcome, and §4's rule applies to every one
    of them: **verify each instruction against `src/isa_*.zig` before measuring**, hand-write
    the programs rather than generating them, and declare `.expected_loss` where CLS64 loses
    (which is everywhere so far). Candidate shapes not yet covered: a branch-heavy control-flow
@@ -249,9 +251,17 @@ test really exercises the shipped programs rather than only fixtures.
 4. **`cap.*`** stays decode-only. §3.5 v1.12 explains why: the register pair has no
    `length` bit position, so a capability cannot be reconstructed. Needs a §6 redesign, not
    a bug fix.
-5. **CLS64 loses every example kernel**, and loses worst of four on `matmul_8x8` (11044
-   against x86-64's 4838). **That is the intended result.** Do not "fix" it by changing the
-   programs.
+5. **CLS64 loses eight of the nine example kernels** — but NOT all of them any more.
+   `stream_copy_sum` is the first WIN: 1801 retired against RISC-V's 3342, AArch64's 3853
+   and x86-64's 3085. It wins because the kernel is **purely streaming** — one fused
+   `stream.copy` replaces the other three ISAs' entire 256-iteration copy loop — and the
+   accounting closes (see `docs/STATUS.md` F42). Its counterpart is `fused_stream_add`,
+   which declared a win and **falsified it**: that kernel must also *sum* its array, and
+   the 256 scalar iterations of non-uniform work ate the saving.
+
+   The single rule that explains both: **the stream engine wins when the kernel is purely
+   streaming, and loses when the same kernel also needs per-element work.** Do not "fix"
+   any row by changing the programs, in either direction.
 
 ---
 

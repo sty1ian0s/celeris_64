@@ -2254,3 +2254,65 @@ this repository's subsets.
 and x86-64.** That is the declared and expected outcome — CLS64 pays `compare` + `branch`
 plus an unconditional `jump` to rejoin, where the others fall through. **Do not tune the
 programs to change it.**
+
+---
+
+## F42: the example suite's first CLS64 WIN — and it is attributable, not tuned
+
+**Status: closed by measurement.** `stream_copy_sum`, the ninth kernel, is the only kernel
+in this suite where CLS64 retires fewer instructions than all three other ISAs. Every other
+kernel — all eight — is a loss.
+
+```
+stream_copy_sum  Celeris-64 CLS64   1801 simulated   14408   win   32954
+stream_copy_sum  RISC-V RV64I       3342 simulated   13368   win   32954
+stream_copy_sum  AArch64 A64        3853 simulated   15412   win   32954
+stream_copy_sum  x86-64             3085 simulated    9268   win   32954
+```
+
+### Why this is a finding and not a result that was arranged
+
+The kernel copies 256 bytes with **one fused `stream.copy`**, then sums the copy. CLS64
+saves the entire copy loop; the other three run a 256-iteration load/store loop at roughly
+five instructions each.
+
+**The accounting closes, which is what makes the win attributable.** The measured gap
+against x86-64 is ~1284 retired instructions. The fused copy saves ~1279 (256 iterations ×
+~5 instructions), and CLS64 pays back ~256 extra `jump`s in the *sum* loop, where its
+`branch` can only transfer on a status match and never falls out by itself. **~1279 − ~256
+≈ the observed gap.** The win therefore belongs to the fused copy and not to a hand-written
+advantage in the CLS64 program.
+
+This is deliberately the counterpart to `fused_stream_add`, which declared an expected win
+and **falsified it** — that kernel must also *sum* its array, and the 256 scalar iterations
+of non-uniform work ate the saving. Stated as one rule: **the stream engine wins when the
+kernel is purely streaming, and loses when the same kernel also needs per-element work.**
+`stream_copy_sum` is the pure case; `fused_stream_add` is the mixed one.
+
+### The sum over the COPY is what makes it falsifiable
+
+The programs sum the **destination**, not the source. A copy that did nothing, wrote the
+wrong region, or stopped early produces a different answer instead of passing. Verified by
+running, in a throwaway copy (never the shared tree): reducing the fused copy from 256
+bytes to 1 makes the suite report `NOT equivalent` at address 8448 and fail the build.
+
+### A defect this kernel exposed in the tests themselves
+
+Adding it **broke two existing tests**, found by the cold run (2 of 1016 failing). Both held
+a literal index into `examples` — `examples[6]` for `matmul_8x8`, `examples[4]` for
+`word_sum` — and inserting a kernel shifted every later entry. They failed **loudly**,
+because each asserts the name it expected, which is the right design; but an index into an
+array that other work appends to is a defect waiting for the next kernel.
+
+Fixed by looking up **by name** through a new `exampleNamed` helper that panics on a missing
+name, so a test can never silently measure a kernel other than the one it named. The four
+mutation sites take `ex.*` into a mutable local.
+
+### A near-miss worth recording
+
+The first RISC-V word list embedded in `examples.zig` came from a **stale draft** rather
+than the linked object. `li a0, 8704` is **two** instructions (`li a0, 17; slli a0, a0, 9`)
+because 8704 does not fit one immediate, and the draft had a single wrong word in slot 0.
+The suite caught it as `NOT equivalent at address 8192` — the **source** region, which the
+bogus program had been corrupting. The lesson is the one F41 already recorded: **copy
+machine words from the produced object, never retype or paste them from a draft.**
