@@ -14,8 +14,20 @@
 
 const std = @import("std");
 const diag = @import("diagnostics.zig");
+const analyzer = @import("analyzer.zig");
 
 pub const Diagnostic = diag.Diagnostic;
+
+/// Same one-module reason as `disassembler` below: a test root that needs the
+/// diagnostics renderer reaches it through this handle, because diagnostics.zig is
+/// already in this module's graph and may not be imported into a second one.
+pub const diagnostics = diag;
+
+/// The example suite's CLS64 kernels, so `tests/analyzer_no_false_positives.zig` can
+/// analyse the programs this repository actually ships. Re-exported for the same
+/// one-module reason as `disassembler`: nothing on the tooling path follows this
+/// reference, so a root that does not name it does not build examples.zig.
+pub const examples = @import("examples.zig");
 
 /// Re-exported so a test root can reach both tools through one module. They
 /// share diagnostics.zig, and Zig refuses to put one file in two modules.
@@ -475,6 +487,9 @@ pub const Assembler = struct {
     symbols: std.StringHashMapUnmanaged(usize) = .{},
     /// Label references whose target is not known yet, patched in a final pass.
     pending: std.ArrayListUnmanaged(PendingRef) = .empty,
+    /// One row per emitted instruction, for src/analyzer.zig. Also the entry point
+    /// for the CLI's findings: see `analyzeSource`.
+    analysis: std.ArrayListUnmanaged(analyzer.Analyzed) = .empty,
     /// The most recently assembled instruction. Kept so callers (the
     /// disassembler's round-trip test and the CLI) can inspect the decoded
     /// form without re-deriving it from the word.
@@ -514,6 +529,7 @@ pub const Assembler = struct {
         self.symbols.clearRetainingCapacity();
         self.pending.clearRetainingCapacity();
         self.words.clearRetainingCapacity();
+        self.analysis.clearRetainingCapacity();
 
         // PASS 1: collect label definitions and their instruction indices.
         //
@@ -581,6 +597,25 @@ pub const Assembler = struct {
                     .kind = if (insn.opcode == .jump or insn.opcode == .call) .absolute48 else .relative28,
                 }) catch return error.OutOfMemory;
             }
+            // Record the instruction for src/analyzer.zig. `text` slices the
+            // caller's source buffer, which outlives the Program, so nothing is
+            // copied here: this loop allocates only for the list itself.
+            self.analysis.append(self.allocator(), .{
+                .insn = insn,
+                .line = line_no,
+                .text = std.mem.trim(u8, body, " \t"),
+            }) catch return error.OutOfMemory;
+        }
+
+        // Absolute targets for the analyzer. A literal transfer is known now; a
+        // labelled one is overwritten by pass 3 with the label's own address.
+        for (self.analysis.items, 0..) |*row, index| {
+            const here = @as(u64, @intCast(index)) * insn_bytes;
+            switch (row.insn.opcode) {
+                .jump, .call => row.target = @as(u64, @bitCast(row.insn.imm)) & 0xFFFF_FFFF_FFFF,
+                .branch => row.target = here +% @as(u64, @bitCast(row.insn.imm)),
+                else => {},
+            }
         }
 
         // PASS 3: patch every reference now that all addresses are known.
@@ -613,6 +648,7 @@ pub const Assembler = struct {
                 },
             }
             self.words.items[ref.word_index] = word;
+            self.analysis.items[ref.word_index].target = target_addr;
         }
 
         return .{
@@ -620,6 +656,15 @@ pub const Assembler = struct {
             .words = self.words.items,
             .warnings = self.warnings.items,
         };
+    }
+
+    /// Runs src/analyzer.zig over the last successful `assembleSource`.
+    ///
+    /// Kept out of `Program` on purpose: analysis allocates nothing, and a caller
+    /// that only wants the image pays for a single walk of a table the assembler
+    /// already built.
+    pub fn analyzeSource(self: *const Assembler, file: []const u8) analyzer.Findings {
+        return analyzer.analyze(self.analysis.items, file);
     }
 
     /// Assembles one already-trimmed line.

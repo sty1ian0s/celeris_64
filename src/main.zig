@@ -127,6 +127,7 @@ fn cmdAssemble(io: std.Io, alloc: std.mem.Allocator, in_path: []const u8, out_pa
     }
 
     writeFile(io, out_path, image.items) catch |e| return reportIoError("writing the assembled image", out_path, e);
+    printFindings(&assember, in_path);
     printWarnings(program.warnings);
 
     var buf: [256]u8 = undefined;
@@ -154,6 +155,7 @@ fn cmdRunSource(io: std.Io, alloc: std.mem.Allocator, path: []const u8) u8 {
         error.OutOfMemory => return reportOutOfMemory(),
         error.AssemblyFailed => return reportDiagnostic(d),
     };
+    printFindings(&assember, path);
     printWarnings(program.warnings);
     return execute(io, alloc, program.words, path);
 }
@@ -305,6 +307,7 @@ fn cmdTrace(io: std.Io, alloc: std.mem.Allocator, path: []const u8) u8 {
         error.OutOfMemory => return reportOutOfMemory(),
         error.AssemblyFailed => return reportDiagnostic(d),
     };
+    printFindings(&assember, path);
     printWarnings(program.warnings);
 
     const image = alloc.alloc(u8, image_bytes) catch return reportOutOfMemory();
@@ -394,6 +397,18 @@ fn printWarnings(warnings: []const Diagnostic) void {
         d.render(&w) catch {};
         w.writeAll("\n") catch {};
         printErr(w.buffered());
+    }
+}
+
+/// Static-analysis findings from src/analyzer.zig. All three source-driven
+/// subcommands call this, so `asm`, `run` and `trace` say the same thing about the
+/// same program. Findings are warnings: they never change the exit code, exactly as
+/// the register-spill warning does not (AGENTS.md §4.3).
+fn printFindings(assember: *const assembler.Assembler, path: []const u8) void {
+    const findings = assember.analyzeSource(path);
+    printWarnings(findings.slice());
+    if (findings.truncated) {
+        printErr("warning: this program produced more findings than this tool reports in one run, so the list above is not complete.");
     }
 }
 

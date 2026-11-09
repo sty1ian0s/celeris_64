@@ -101,6 +101,9 @@ pub const Diagnostic = struct {
     detail: ?[]const u8 = null,
     /// The last successfully parsed token, so the user knows how far it got.
     after: ?[]const u8 = null,
+    /// A finding from src/analyzer.zig whose own sentence needs neither a number
+    /// nor a quoted instruction: WHAT was found and WHY it matters.
+    finding: ?[]const u8 = null,
 
     pub fn render(self: Diagnostic, w: *std.Io.Writer) std.Io.Writer.Error!void {
         try w.writeAll(switch (self.severity) {
@@ -116,6 +119,40 @@ pub const Diagnostic = struct {
         // a bare "at" there rendered as "at  while decoding...", which reads as a typo.
         const has_location = self.file != null or self.line != null or
             self.column != null or self.pc != null;
+
+        // A finding (src/analyzer.zig) is not a failure to name an operand, so it
+        // renders as its own sentence: the location, then WHAT was found. Without
+        // this branch `finding` would be spliced onto "...the input", which reads
+        // as a parse error rather than as a finding.
+        if (self.finding) |f| {
+            if (has_location) try w.writeAll(" at ");
+            var wrote_any = false;
+            if (self.file) |file| {
+                try w.writeAll(file);
+                wrote_any = true;
+            }
+            if (self.line) |ln| {
+                if (wrote_any) try w.writeAll(", ");
+                try w.print("line {d}", .{ln});
+                wrote_any = true;
+            }
+            if (self.pc) |address| {
+                if (wrote_any) try w.writeAll(", ");
+                try w.print("PC {d}", .{address});
+            }
+            // The quoted text, when there is one, names WHICH thing the finding is
+            // about: "at prog.asm, line 5 the instruction \"jump loop\" transfers
+            // to the instruction immediately after itself".
+            if (self.offending) |text| {
+                try w.print(", where the instruction \"{s}\" {s}", .{ text, f });
+            } else {
+                try w.print(", where it {s}", .{f});
+            }
+            try w.writeAll(".");
+            if (self.expected) |e| try w.print(" Expected {s}.", .{e});
+            if (self.detail) |d| try w.print(" {s}", .{d});
+            return;
+        }
 
         if (has_location or self.stage.len != 0) {
             if (has_location) {
@@ -365,6 +402,40 @@ pub fn spill(used: usize) Diagnostic {
     };
 }
 
+/// A static-analysis finding (src/analyzer.zig). Warnings, like `spill`: the
+/// program still assembles and runs, and the sentence says WHY the pattern is
+/// worth knowing about rather than forbidding it.
+///
+/// A transfer that lands on the instruction after itself. Both forms assemble: a
+/// `jump` to the next address still moves PC, and a `branch` with an offset of one
+/// instruction takes its edge to its own fall-through.
+pub fn transferToNext(file: []const u8, line: usize, text: []const u8, expected: []const u8) Diagnostic {
+    return .{
+        .severity = .warning,
+        .file = file,
+        .line = line,
+        .finding = "transfers to the instruction immediately after itself",
+        .offending = text,
+        .expected = expected,
+        .detail = "It changes control flow without changing what the program does, which is usually a label placed one line too low or a jump meant for somewhere else.",
+    };
+}
+
+/// A label written on the line of an instruction that cannot be a transfer target.
+/// `text` is the whole line (the label and its instruction), because that is what
+/// the reader has to look at to see the problem.
+pub fn lostLabel(file: []const u8, line: usize, label: []const u8, expected: []const u8) Diagnostic {
+    return .{
+        .severity = .warning,
+        .file = file,
+        .line = line,
+        .finding = "is a label that no jump, call or branch can reach",
+        .offending = label,
+        .expected = expected,
+        .detail = "A label names an address, and the only instructions that read one are jump, call and branch (docs/isa-encoding.md §3.0), so this label names somewhere no transfer can land.",
+    };
+}
+
 /// Truncated flat image: a whole number of 64-bit instruction words is
 /// required, because instruction width is fixed (docs/isa-encoding.md §1).
 pub fn truncatedImage(file: []const u8, bytes: usize, remainder: usize) Diagnostic {
@@ -401,6 +472,10 @@ test "no diagnostic constructor emits a bare hex token" {
         spill(13),
         .{ .stage = "decoding this word", .action = "decoded", .word = 0xDEADBEEFCAFEF00D },
         .{ .stage = "executing this instruction", .action = "executed", .word = 0x0000000000000042, .expected = "an opcode defined in the instruction map" },
+        // src/analyzer.zig's findings. A finding carries a sentence instead of a
+        // value, and must be as free of bare hex as an error is.
+        transferToNext("t.asm", 3, "jump done", "no control transfer at all, because this one lands on the instruction that already follows it"),
+        lostLabel("t.asm", 4, "copy: mov R0, R1", "a label on its own line above a jump, call or branch"),
     };
     for (cases) |c| {
         const text = renderToBuffer(c, &buf);

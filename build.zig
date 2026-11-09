@@ -244,6 +244,24 @@ pub fn build(b: *std.Build) void {
     const examples_run = b.addRunArtifact(examples_exe);
     b.step("examples", "Run the cross-architecture example suite (no timing claims)").dependOn(&examples_run.step);
 
+    // The static analyzers' no-false-positive contract, checked against the programs
+    // this repository ships: the six example kernels and the cross-check programs.
+    // Each must produce ZERO findings — the claim that matters most for an analyzer,
+    // and one no inline test of src/assembler.zig can make, because the kernels live
+    // in examples.zig, which the assembler cannot import (it pulls in the VM).
+    //
+    // The kernels are reached through the tooling module's re-export rather than by
+    // importing examples.zig a second time: examples.zig already imports
+    // assembler.zig, so a second module holding it would be a file in two modules.
+    const analyzer_fp_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/analyzer_no_false_positives.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    analyzer_fp_tests.root_module.addImport("tooling", tooling_mod);
+
     const test_step = b.step("test", "Run the Celeris-64 test suite");
     test_step.dependOn(&b.addRunArtifact(vm_tests).step);
     test_step.dependOn(&b.addRunArtifact(suite_tests).step);
@@ -256,6 +274,10 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(fuzz_tests).step);
     test_step.dependOn(&b.addRunArtifact(bench_tests).step);
     test_step.dependOn(&b.addRunArtifact(verifier_tests).step);
+    // Without this line the analyzer's no-false-positive tests would exist and never
+    // run — the "a green suite that skips the feature under test" failure this build
+    // file already records twice (the disassembler's 56 tests, the verifier's 24).
+    test_step.dependOn(&b.addRunArtifact(analyzer_fp_tests).step);
 
     // Cross-architecture executors. Each is a separate root because each is a
     // self-contained ISA implementation that must be verifiable on its own —
