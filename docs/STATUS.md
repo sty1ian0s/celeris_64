@@ -2316,3 +2316,204 @@ because 8704 does not fit one immediate, and the draft had a single wrong word i
 The suite caught it as `NOT equivalent at address 8192` — the **source** region, which the
 bogus program had been corrupting. The lesson is the one F41 already recorded: **copy
 machine words from the produced object, never retype or paste them from a draft.**
+
+---
+
+## F43: `UNSIGNED_LESS` and `UNSIGNED_GREATER` are unreachable from any CLS64 program
+
+**Found** while writing a branch-heavy example kernel: a program that counted words in an
+unsigned band returned **0** instead of 61, because its `branch R9, [UNSIGNED_LESS], ...`
+could never fire. **Status: open, with a decision to make.**
+
+### The defect
+
+§3.2.1 defines **five** status values, and says "exactly one value is produced":
+
+| Value | Name | Meaning |
+|---|---|---|
+| `0` | `EQUAL` | `rs1 == src2` |
+| `1` | `LESS` | `rs1 < src2`, signed |
+| `2` | `GREATER` | `rs1 > src2`, signed |
+| `3` | `UNSIGNED_LESS` | `rs1 < src2`, unsigned |
+| `4` | `UNSIGNED_GREATER` | `rs1 > src2`, unsigned |
+
+`src/vm.zig:293` calls `selection.compareSigned` **unconditionally**, and that function
+(`src/select.zig:36-39`) can only return `equal`, `less` or `greater`. So a CLS64 program
+can **never** observe status `3` or `4`, and every `branch Rs, [UNSIGNED_LESS], ...` or
+`[UNSIGNED_GREATER]` is **dead code that never fires** — silently, with no assembler or
+decoder complaint.
+
+**Reproduced directly.** `0x8000000000000000` vs `0x4000000000000000` is *unsigned*-greater
+(`0x8… > 0x4…`) but *signed*-less (`0x8…` is negative). §3.2.1's single-value rule requires
+`UNSIGNED_GREATER` (4). The simulator returns **1 (`LESS`)**.
+
+### The code's own comment states the assumption that is wrong
+
+```zig
+// Signedness is a property of the instruction, and this decoder does not
+// carry one, so the encoding contract's only defined reading is used: the
+// signed view, which is what §3.2.1 defines LESS/GREATER against.
+```
+
+Two things in that are worth separating. It is **true** that the decoder carries no
+signedness bit, and true that §3.2.1 defines LESS/GREATER against the signed view. But the
+conclusion — "so the signed view is the only defined reading" — does not follow. §3.2.1
+defines **one** enum with **five** members and says exactly one is produced; it never says
+the produced member is chosen by a per-instruction signedness field. The enum is defined to
+express *both* orderings **in one value**, which is why `UNSIGNED_LESS` and
+`UNSIGNED_GREATER` exist as separate members at all.
+
+### This is a two-layer divergence, which is what makes it serious
+
+`rtl/select_unit.sv:115-124` computes the status from a **`signed_view_i` port** and
+produces **all five** values, and `rtl/tb/stream_tb.sv:612-613` pins
+`STATUS_UNSIGNED_LESS == 3` and `STATUS_UNSIGNED_GREATER == 4`. **The RTL can emit statuses
+the simulator cannot.** So this is not merely an unimplemented corner: the two
+implementations of §3.2.1 disagree, and the RTL is the one that matches the contract's
+table.
+
+`src/analyzer.zig:62-66` already noticed the symptom and **worked around it rather than
+reporting it** — it lists "a `branch` that tests a status `compare` cannot produce" among
+its deliberately-rejected rules, noting that "`compare` yields EQUAL/LESS/GREATER, so
+UNSIGNED_LESS/UNSIGNED_GREATER look unreachable". The rejection is correct *as a rule*
+(the tested register may be written on another path), but the observation underneath it was
+a defect and was recorded only as a reason not to write a warning.
+
+### Why this is the F8 shape again, in its fourth appearance
+
+A rule enforced in one layer — the RTL produces five statuses, `branch` accepts five match
+values, the assembler and disassembler both round-trip all five — while the path that
+actually reaches the input (the simulator's `compare`) implements three. Every
+self-consistency check in the repository agrees, because nothing compares the simulator's
+status output against the RTL's for a value where they differ. See F24/F27, F37 and F38.
+
+### What closing it needs — a decision, not a patch
+
+Two readings, and picking one silently is what F37 taught this file not to do:
+
+- **(a) The simulator is wrong.** Give `compare` the unsigned view when it should have it.
+  But **the encoding carries no signedness bit** — that much of the existing comment is
+  correct — so this needs a rule saying which view a bare `compare` uses, and by what
+  signal. Options: a per-instruction modifier in the syntax that maps to an existing field
+  (none is free on §3.2's row), or making the *branch*'s match value choose the view, which
+  makes `branch` mean something its §3.0.1 text does not say.
+- **(b) The contract is wrong.** §3.2.1 keeps five enum members for the RTL and the
+  architecture's "boolean blindness" story, but states that the **simulator's `compare`
+  produces only the signed ordering**, and that `UNSIGNED_*` are reserved for future use —
+  which would make every `[UNSIGNED_*]` branch a diagnosed error rather than silent dead
+  code.
+
+**(b) is smaller and matches the simulator as built, but it contradicts a normative table
+and the RTL that implements it.** (a) matches the table but has no free field to carry the
+signal. **Recorded rather than patched.**
+
+**What may NOT be said:** that the CLS64 ISA lacks unsigned comparison. It defines it, five
+members strong, and the RTL implements it. The gap is in the simulator's `compare`.
+
+---
+
+## F44: `MOV r64, imm64` writes the wrong register when REX.B is set (F38's shape, second path)
+
+> **FIXED and verified.** Found while writing a branch-heavy example kernel
+> (`band_count`) whose x86-64 program faulted and returned garbage. All three sites are
+> repaired and a regression test pins them; the kernel that exposed it now passes. The
+> original entry is kept below, including the audit it asked for.
+>
+> **The fix** is one expression per family — `+ rex_b` becomes `+ (@as(u4, rex_b) << 3)` —
+> at `src/isa_x86_64.zig:184` (PUSH), `:189` (POP) and `:421` (MOV). The audit found
+> **exactly three** sites, all opcode-embedded; every ModRM path was already correct.
+>
+> **Verified by running:** `49 B9` now writes `r9` (not `r2`), `49 BA` writes `r10`,
+> and `pop %r11` / `push %r10` round-trip correctly. **Load-bearing, proven by mutation in
+> a throwaway copy:** reverting all three to `+ rex_b` makes the new regression test fail
+> (1 failed, 0 passed). The end-to-end case is the `band_count` kernel's x86-64 program,
+> which faulted before the fix and computes 67 after it.
+>
+> **One detail worth keeping:** the buggy POP at `41 5B` computed index `3 + 1 = 4`, which
+> is **RSP** — so an extended-register `pop` would have corrupted the stack pointer, not
+> merely written a wrong general register. The regression test asserts RSP is left alone
+> for that reason.
+
+**Found** while writing a branch-heavy example kernel whose x86-64 program faulted and
+returned garbage. **Status at the time: open.** The original scope question is answered by
+the audit below.
+
+### The defect
+
+`src/isa_x86_64.zig:420-427` handles `MOV r32/r64, imm`:
+
+```zig
+0xB8...0xBF => { // MOV r32/r64, imm
+    const r: u4 = @truncate(op - 0xB8 + rex_b);
+    if (rex_w) {
+        self.regs[r] = try self.fetchBits(8);
+    } else {
+        self.regs[r] = @as(u32, @truncate(try self.fetchBits(4)));
+    }
+},
+```
+
+For the `0xB8`–`0xBF` family the register is **encoded in the opcode**, so the index is
+`(op - 0xB8)` for `r0`–`r7` and `(op - 0xB8) + 8` for `r8`–`r15` when REX.B is set. The code
+adds **`rex_b`, which is `1`** — so `0x49 0xB9` (`movq $imm, %r9`) computes `1 + 1 = 2` and
+writes **`r2`**, not `r9`.
+
+**Reproduced.** `49 B9 11 22 33 44 55 66 77 88` is `movq $0x8877665544332211, %r9` per
+`llvm-mc`. The simulator reports the correct instruction length (10) and the immediate is
+consumed — so nothing downstream notices — but the value appears in **`r2`**:
+
+```
+PROOF: 0x49 0xB9 (should write r9=0x8877665544332211)
+  r2 = 0x8877665544332211   <-- written here
+```
+
+`0x48 0xB8` (`movq $imm, %rax`) works correctly, which is why the suite never caught this:
+**the extended-register space of the `0xB8` family was unexercised**, exactly as F38 found
+for the ModRM path.
+
+### Why this is F38's shape rather than a new class
+
+F38 recorded that REX.R and REX.B were stored unnormalised — `b & 0x04` is `4`, not `1` —
+so `rex_r << 3` was 32 and truncated to 0, and **both** extension bits resolved to their low
+counterparts for every instruction naming an extended register. That was fixed by
+normalising each bit to its own position, and the fix is correct here too: `rex_b = b & 0x01`
+yields `1`.
+
+**But normalising the bit is only half of what the field means.** For a ModRM-extension bit,
+setting it adds **8** to a 3-bit register number, so contributing `1` and then shifting is
+one way to write it — which is what the fixed ModRM paths do. For an **opcode-embedded**
+register number there is no shift to apply, so the `+ rex_b` is simply wrong arithmetic and
+must be `+ (rex_b << 3)`. **The same normalised bit has two different meanings**, and F38's
+fix addressed only the paths that shift.
+
+### What closing it needs
+
+1. `0xB8...0xBF` must compute `op - 0xB8 + (@as(u4, rex_b) << 3)`.
+2. **Every other opcode-embedded register field must be audited for the same mistake.** The
+   `0x50`–`0x57` PUSH/POP family and `0x90`–`0x97` XCHG encode a register the same way. Any
+   of them that adds the raw REX bit rather than eight times it has this defect.
+3. A regression test in the F38 style: the LLVM encoding of an extended-register `movq`
+   immediate, asserted to land in `r9` **and** asserted not to land in `r2`, so the failure
+   cannot recur silently in a different register.
+
+**The audit in step 2 is DONE, and the scope is exactly three sites — all of them
+opcode-embedded:**
+
+| Line | Family | Register field | Verdict |
+|---|---|---|---|
+| `src/isa_x86_64.zig:184` | `0x50`–`0x57` PUSH r64 | opcode-embedded | **BUG**: `+ rex_b` |
+| `src/isa_x86_64.zig:189` | `0x58`–`0x5F` POP r64 | opcode-embedded | **BUG**: `+ rex_b` |
+| `src/isa_x86_64.zig:421` | `0xB8`–`0xBF` MOV r,imm | opcode-embedded | **BUG**: `+ rex_b` |
+
+**Every ModRM path is correct** — lines 255, 288, 336, 378, 401, 432 and 470 all read
+`(modrm & 7) + (@as(u8, rex_b) << 3)`. So the split is clean and explicable: the paths that
+**shift** the bit are right, and the three that **add** it are wrong. The fix is the same
+one-character class in each: `+ rex_b` becomes `+ (@as(u4, rex_b) << 3)`.
+
+`PUSH`/`POP` are exercised only through the stack, and the suite's x86-64 programs never
+name `r8`–`r15` in those families, which is why both defects survived. Reproduced:
+`41 52` (`push %r10`) and `41 53` (`push %r11`) both push the same low register.
+
+**What may NOT be said:** that the x86-64 decoder mishandles REX generally. The ModRM path
+was fixed under F38 and is correct throughout; these are the three opcode-embedded families,
+where the same normalised bit means something the shift-based paths do not express.

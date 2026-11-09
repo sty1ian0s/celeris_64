@@ -400,6 +400,102 @@ pub const examples = [_]Example{
     },
 
     // ====================================================================
+    // band_count
+    // ====================================================================
+    // WHY IT IS HERE, AND WHY CLS64 IS EXPECTED TO LOSE: a BRANCH-HEAVY reduction. Each
+    //     element needs TWO bound tests, and the two bounds are chosen so that neither
+    //     test alone gives the answer - the count is 67, but "x >= LO" alone matches 184
+    //     and "x < HI" alone matches 195. So both branches decide the result and neither
+    //     can be dropped without the answer changing.
+    //
+    //     CLS64 loses because its only conditional transfer fires when a status EQUALS a
+    //     constant and can never fall out of a body by itself, so every skip costs a
+    //     `branch` PLUS an unconditional `jump` where the other three fall through. With
+    //     two tests per element that cost is paid twice per iteration, which is the
+    //     shape that punishes the design hardest.
+    //
+    //     THE BOUNDS ARE SIGNED on purpose. The first draft of this kernel used the
+    //     unsigned band [2^62, 2^63) and returned 0 instead of 61, because
+    //     `branch [UNSIGNED_LESS]` can never fire in this simulator - `compare` always
+    //     takes the signed view, so statuses 3 and 4 are unreachable. That is recorded
+    //     as F43 in docs/STATUS.md and is a defect in the simulator, not in this kernel.
+    //     The kernel was rewritten to use the reachable statuses only, and the signed
+    //     band is just as good a test of branch behaviour.
+    .{
+        .name = "band_count",
+        .what = "count signed words in [-2^62, 0), a two-sided band needing two tests per element",
+        .expectation = .expected_loss,
+        .data = word_data,
+        .cls64 =
+        \\# Count signed 64-bit words in the band [-2^62, 0).
+        \\#
+        \\# Two bound tests per element. `-2^62` does not fit the signed 28-bit immediate,
+        \\# so it is built: 1 << 62, then negated with `sub` from R0 (the hardwired zero).
+        \\#
+        \\# Every skip costs a `branch` plus a `jump`, because `branch` only transfers on a
+        \\# status match and never falls out of a body by itself.
+        \\mov R1, 8192        # cursor
+        \\mov R2, 0           # count
+        \\mov R3, 0           # bytes consumed
+        \\mov R4, 2048        # total bytes
+        \\mov R5, 8448        # result slot
+        \\mov R6, 1
+        \\shl R6, R6, 62
+        \\sub R6, R0, R6      # R6 = LO = -2^62
+        \\loop:
+        \\compare R9, R3, R4
+        \\branch R9, [EQUAL], done
+        \\load R7, [R1+0]
+        \\compare R9, R7, R6
+        \\branch R9, [LESS], next      # x < LO -> out of band
+        \\compare R9, R7, R0
+        \\branch R9, [LESS], bump      # LO <= x < 0 -> in band
+        \\jump next
+        \\bump:
+        \\add R2, R2, 1
+        \\next:
+        \\add R1, R1, 8
+        \\add R3, R3, 8
+        \\jump loop
+        \\done:
+        \\store R2, [R5+0]
+        \\halt
+        ,
+        // `blt` is the signed less-than. `a7 = 93; ecall` is the halt this decoder
+        // implements (checked against src/isa_riscv.zig, which reads register 17).
+        .riscv = &.{
+            0x00002537, 0x00000593, 0x00000613, 0x00100693, 0x00B69693, 0x00002737,
+            0x1007071B, 0x00100793, 0x03E79793, 0x40F007B3, 0x02D65663, 0x00053803,
+            0x00F84463, 0x00084863, 0x00850513, 0x00860613, 0xFE9FF06F, 0x00158593,
+            0x00850513, 0x00860613, 0xFD9FF06F, 0x00B73023, 0x05D00893, 0x00000073,
+        },
+        // `movz x5, #16384, lsl #48` then `sub x5, xzr, x5` builds -2^62. This subset
+        // has NO standalone `lsl` (it is UBFM, which the decoder does not implement),
+        // so the shift lives inside MOVZ's own `lsl #48` field - checked against
+        // src/isa_aarch64.zig before measuring, which is the rule F41 established.
+        .aarch64 = &.{
+            0xD2840000, 0xD2800001, 0xD2800002, 0xD2810003, 0xD2842004, 0xD2E80005,
+            0xCB0503E5, 0xEB03005F, 0x540001A0, 0xF9400006, 0xEB0500DF, 0x5400006B,
+            0xEB1F00DF, 0x5400008B, 0x91002000, 0x91002042, 0x17FFFFF7, 0x91000421,
+            0x91002000, 0x91002042, 0x17FFFFF3, 0xF9000081, 0x14000000,
+        },
+        // `movq $-2^62, %r9` is the 10-byte imm64 form (49 B9 ...). This kernel is what
+        // FOUND that the decoder wrote it to r2 instead of r9 - see F44 in
+        // docs/STATUS.md; the defect is fixed and pinned by a regression test, and this
+        // program is the end-to-end case that exposed it.
+        .x86 = &.{
+            0x48, 0xC7, 0xC0, 0x00, 0x20, 0x00, 0x00, 0x48, 0x31, 0xC9, 0x48, 0x31,
+            0xF6, 0x48, 0xC7, 0xC2, 0x00, 0x08, 0x00, 0x00, 0x48, 0xC7, 0xC7, 0x00,
+            0x21, 0x00, 0x00, 0x49, 0xB9, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0xC0, 0x48, 0x39, 0xD6, 0x74, 0x24, 0x4C, 0x8B, 0x00, 0x4D, 0x39, 0xC8,
+            0x7C, 0x05, 0x4D, 0x85, 0xC0, 0x7C, 0x0A, 0x48, 0x83, 0xC0, 0x08, 0x48,
+            0x83, 0xC6, 0x08, 0xEB, 0xE4, 0x48, 0xFF, 0xC1, 0x48, 0x83, 0xC0, 0x08,
+            0x48, 0x83, 0xC6, 0x08, 0xEB, 0xD7, 0x48, 0x89, 0x0F, 0xEB, 0xFE,
+        },
+        .answer = 67,
+    },
+
+    // ====================================================================
     // loop_sum
     // ====================================================================
     // WHY IT IS HERE, AND WHY CLS64 IS EXPECTED TO LOSE MOST BADLY HERE: with a body of
@@ -865,6 +961,18 @@ pub fn answerFor(name: []const u8) u64 {
     if (std.mem.eql(u8, name, "byte_sum")) {
         var acc: u64 = 0;
         for (byte_data) |b| acc += b;
+        return acc;
+    }
+    if (std.mem.eql(u8, name, "band_count")) {
+        // The signed band count, taken from the input. BOTH bounds are applied, so a
+        // program that tested only one of them disagrees: "x >= LO" alone matches 184
+        // words and "x < HI" alone matches 195, against the band's 67.
+        var acc: u64 = 0;
+        var i: usize = 0;
+        while (i < word_data.len) : (i += 8) {
+            const v: i64 = @bitCast(std.mem.readInt(u64, word_data[i..][0..8], .little));
+            if (v >= -(1 << 62) and v < 0) acc += 1;
+        }
         return acc;
     }
     if (std.mem.eql(u8, name, "stream_copy_sum")) {

@@ -181,12 +181,15 @@ pub const Cpu = struct {
                 self.branched = true;
             },
             0x50...0x57 => { // PUSH r64
-                const r: u4 = @truncate(op - 0x50 + rex_b);
+                // F44: the register is embedded in the OPCODE, so REX.B adds EIGHT to
+                // the index, not one. `+ rex_b` pushed the wrong register for r8-r15.
+                const r: u4 = @truncate(op - 0x50 + (@as(u4, rex_b) << 3));
                 self.regs[4] -= 8;
                 try self.store(self.regs[4], 8, self.regs[r]);
             },
             0x58...0x5F => { // POP r64
-                const r: u4 = @truncate(op - 0x58 + rex_b);
+                // F44, as above.
+                const r: u4 = @truncate(op - 0x58 + (@as(u4, rex_b) << 3));
                 self.regs[r] = try self.load(self.regs[4], 8);
                 self.regs[4] += 8;
             },
@@ -418,7 +421,10 @@ pub const Cpu = struct {
                 }
             },
             0xB8...0xBF => { // MOV r32/r64, imm
-                const r: u4 = @truncate(op - 0xB8 + rex_b);
+                // F44: opcode-embedded register, so REX.B adds EIGHT. `+ rex_b` made
+                // `49 B9` (movq $imm, %r9) write r2 instead - with the correct length
+                // and the immediate consumed, so nothing downstream noticed.
+                const r: u4 = @truncate(op - 0xB8 + (@as(u4, rex_b) << 3));
                 if (rex_w) {
                     self.regs[r] = try self.fetchBits(8);
                 } else {
@@ -932,6 +938,71 @@ test "ORACLE: the exact byte lengths LLVM reports" {
             std.debug.print("LENGTH MISMATCH for {s}: expected {d}, got {d}\n", .{ c.name, c.bytes.len, len });
             return e;
         };
+    }
+}
+
+test "REGRESSION (F44): an OPCODE-embedded register adds EIGHT times REX.B, not one" {
+    // The defect this pins is F38's shape surviving on the paths F38 did not cover.
+    // F38 normalised the REX bits to their own position, which is right for the
+    // ModRM-extension paths because they then SHIFT the bit by 3. The 0xB8/0x50/0x58
+    // families encode the register in the OPCODE, where there is no shift to apply,
+    // so `+ rex_b` added 1 instead of 8: `49 B9` (movq $imm, %r9) wrote r2.
+    //
+    // It was silent in the worst way - the instruction length was correct and the
+    // immediate was consumed, so nothing downstream could notice.
+    //
+    // All three families are checked, and each asserts the register it must NOT
+    // touch as well as the one it must, so a fix that moves the value to a different
+    // wrong register cannot pass.
+
+    // MOV r64, imm64: 49 B9 = LLVM's encoding of `movq $0x8877665544332211, %r9`.
+    {
+        const img = try image(&.{ 0x49, 0xB9, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88 });
+        defer testing.allocator.free(img);
+        var cpu = Cpu.init(img);
+        try testing.expectEqual(@as(u64, 10), try cpu.step());
+        try testing.expectEqual(@as(u64, 0x8877665544332211), cpu.read(9));
+        try testing.expectEqual(@as(u64, 0), cpu.read(2)); // the register it used to hit
+    }
+
+    // POP r64: 41 5B = `pop %r11`. The buggy index was 3 + 1 = 4, i.e. it popped into
+    // RSP itself, so this asserts the stack pointer is left alone too.
+    //
+    // The stack sits at `mem.len - 8` (Cpu.init), so these two cases take a fixed-size
+    // image rather than `image()`, whose length varies with the code and would decide
+    // where the stack is.
+    {
+        const img = try testing.allocator.alloc(u8, 4096);
+        defer testing.allocator.free(img);
+        @memset(img, 0);
+        img[0] = 0x41;
+        img[1] = 0x5B;
+        std.mem.writeInt(u64, img[4088..][0..8], 0xABCD, .little);
+        var cpu = Cpu.init(img);
+        const rsp_before = cpu.read(4);
+        _ = try cpu.step();
+        try testing.expectEqual(@as(u64, 0xABCD), cpu.read(11));
+        try testing.expectEqual(rsp_before + 8, cpu.read(4)); // advanced by the pop, and no further
+    }
+
+    // PUSH r64: 41 52 = `push %r10`, read back through POP. The buggy index was
+    // 2 + 1 = 3, so r3 must be untouched.
+    {
+        const img = try testing.allocator.alloc(u8, 4096);
+        defer testing.allocator.free(img);
+        @memset(img, 0);
+        img[0] = 0x41;
+        img[1] = 0x52; // push %r10
+        img[2] = 0x41;
+        img[3] = 0x5A; // pop  %r10
+        var cpu = Cpu.init(img);
+        cpu.regs[10] = 0x1234;
+        cpu.regs[3] = 0xDEAD;
+        _ = try cpu.step();
+        cpu.regs[10] = 0; // clobber, so only a real round trip restores it
+        _ = try cpu.step();
+        try testing.expectEqual(@as(u64, 0x1234), cpu.read(10));
+        try testing.expectEqual(@as(u64, 0xDEAD), cpu.read(3));
     }
 }
 
