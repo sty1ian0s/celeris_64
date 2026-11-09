@@ -201,6 +201,29 @@ pub fn build(b: *std.Build) void {
     const synth_cmd = b.addSystemCommand(&.{ "bash", "tools/rtl-synth.sh", "all" });
     b.step("synth", "Synthesize the RTL and report cell counts (no timing)").dependOn(&synth_cmd.step);
 
+    // Cross-architecture comparison. Executes real machine code for CLS64,
+    // RISC-V, AArch64 and x86-64 in one measurement loop. Reports retired
+    // instructions and encoded bytes; reports no timing quantity, by design.
+    // The report lives in tools/ but imports src/. Using an absolute-ish module
+    // path keeps the import name resolving from the module root rather than from
+    // the importing file's directory.
+    const crossarch_mod = b.createModule(.{
+        .root_source_file = b.path("src/crossarch.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const crossarch_exe = b.addExecutable(.{
+        .name = "crossarch-report",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/crossarch-report.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "crossarch", .module = crossarch_mod }},
+        }),
+    });
+    const crossarch_run = b.addRunArtifact(crossarch_exe);
+    b.step("crossarch", "Compare the workload across four ISAs (no timing claims)").dependOn(&crossarch_run.step);
+
     const test_step = b.step("test", "Run the Celeris-64 test suite");
     test_step.dependOn(&b.addRunArtifact(vm_tests).step);
     test_step.dependOn(&b.addRunArtifact(suite_tests).step);
@@ -213,6 +236,26 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(fuzz_tests).step);
     test_step.dependOn(&b.addRunArtifact(bench_tests).step);
     test_step.dependOn(&b.addRunArtifact(verifier_tests).step);
+
+    // Cross-architecture executors. Each is a separate root because each is a
+    // self-contained ISA implementation that must be verifiable on its own —
+    // including against the LLVM oracle bytes pasted into its tests.
+    const isa_roots = [_][]const u8{
+        "src/isaharness.zig",
+        "src/crossarch.zig",
+        "src/isa_riscv.zig",
+        "src/isa_aarch64.zig",
+        "src/isa_x86_64.zig",
+    };
+    for (isa_roots) |root| {
+        const m = b.createModule(.{
+            .root_source_file = b.path(root),
+            .target = target,
+            .optimize = optimize,
+        });
+        const t = b.addTest(.{ .root_module = m });
+        test_step.dependOn(&b.addRunArtifact(t).step);
+    }
 
     for (stdlib_roots) |root| {
         const m = b.createModule(.{
