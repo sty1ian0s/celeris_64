@@ -1134,3 +1134,73 @@ which is why the F31 edit passed lint while the binary build kept dying.
 
 
 
+
+---
+
+## F19–F30 fixed: contract v1.16
+
+Every defect recorded at v1.15 is closed. Sorting them by what was actually wrong
+— rather than by their assigned numbers — collapsed twelve findings into four fixes:
+
+| Group | Findings | Fix |
+|---|---|---|
+| A field written but never named | F20, F21, F22, F23, F25, F26, F29 | `.raw opcode, operand, rd, rs1` preserves every bit |
+| Decoder accepts what the assembler refuses | F24, F27 (+F23's `rs1`) | the check added **in the decoder**, not only the assembler |
+| Contract silent on a field | F19 | §3.4 now names `setp`'s pointer and reserves `rs1`/`operand[47:40]` |
+| Enforced by nothing | F30 | **retracted — not a defect** |
+
+### Two recorded findings were wrong
+
+This is the part worth keeping. Both were caught by verifying the *recorded words*
+against the *recorded claims* before writing any fix.
+
+**F30 is retracted.** It claimed §3.2.1 reserves `compare`'s `operand[35:0]`. But
+§3.2.1 contains **no bit layout at all** — it defines only the status enum table.
+`compare` correctly follows §3.1's ALU layout, and the recorded word
+`0x20D1600000000800` was handled correctly all along: `zero[39:28] = 0` and
+`imm28 = 0x800 = 2048`. The claim that `0x800` was "dropped" was false; `0x800`
+*is* the immediate. Had this not been checked first, the "fix" would have added a
+reservation that contradicts §3.1 and broken a valid instruction.
+
+**F29 was misattributed.** It recorded a lost `trueReg` (bits `[36:32]`). The word
+`0x201D830000000000` has `imm28 = 0`, so it is register form and `rs2 = 8` is a
+legitimate source — nothing was lost there. The actually-lost field is the **§5
+width suffix** (nibble `3` = `.b`), which `compare`'s renderer never emitted:
+`...83...` → `...80...`. Same defect class, different field.
+
+**F28 is not a defect.** `cap.load R7, R5` has a zero operand and decodes legally.
+Only the assembler's §3.5 even-index rule refuses the odd `rs1`. The decoder
+accepting a well-formed word from a blob is the correct behaviour.
+
+### A VM defect found while fixing F19
+
+`vm.zig`'s `stream.setp` wrote `st.rs1` as the pointer register, but `setp` names
+its pointer with `rd` — the assembler emits `stream.setp R1, -16` as `rd=1, rs1=0`,
+and §3.4 gives `setp` no `rs1`. So the instruction updated **R0** and left the named
+pointer untouched. It was invisible because the one test fixture that covered it set
+`rs1` by hand, which made the wrong register coincidentally correct. F19's decoder
+check turned that fixture into a rejected word, which is how the VM bug surfaced.
+
+### A test fixture was encoding an illegal word
+
+The same fixture wrote the stride as `@bitCast(@as(i48, -16))`, sign-extending into
+`operand[47:40]` and producing `0xFFFFFFFFFFF0`. §3.4 gives `[39:0]` to the stride and
+reserves `[47:40]`, and the assembler never emits that shape. Masked to 40 bits.
+
+### Verification
+
+```
+zig build test --summary all  -> 39/39 steps, 452/452 tests, exit 0   (clean rebuild)
+alu_tb / stream_tb / core_tb  -> 80 / 348 / 159, 0 failures
+cross-check programs          -> 4/4 byte-identical through dis -> asm
+zig build audit               -> 9/9 reserved fields rejected
+zig build bench               -> 0   (every line says "simulated")
+zig build live-check          -> 232/232 facts reproduce
+fuzzer                        -> checked=11592 identical=11592, rejected 1669 -> 3923
+```
+
+The fuzzer line is the strongest evidence the tightening is correct: **the same
+11,592 expressible words still round-trip byte-identically, while the number of
+words correctly refused rose from 1,669 to 3,923.** Rejections up, fidelity
+unchanged — a fix that lost round-trip fidelity would show `identical` below
+`checked`, and one that was too permissive would leave `rejected` flat.
