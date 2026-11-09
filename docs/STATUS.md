@@ -1286,6 +1286,44 @@ write one.
 **Status: open.** Closing it needs either a load/store instruction in the contract, or
 a restatement of §2 naming the two rows for what they are.
 
+### CLOSED (v1.18) — the contract route, not the restatement route
+
+The finding offered two ways out. This closes it by the first: **the load/store
+instruction was added to the contract** in v1.17 (`load` 0x1A, `store` 0x1B, and
+the conditional `branch` 0x05 that a loop also needs). With those, the
+"not expressible in this ISA at all" paragraph above is no longer true, and the
+scalar row can finally be written the way the other three ISAs' rows are.
+
+`src/crossarch.zig` `cls64Program`'s scalar arm is now a real 13-word per-element
+loop, not eight `chunk = 1` issues of the fused engine. The measured change:
+
+| Row | Retired, before | Retired, after | Bytes, before | Bytes, after |
+|---|---|---|---|---|
+| CLS64 batch | 4 | 4 (unchanged) | 32 | 32 (unchanged) |
+| **CLS64 scalar** | **11** | **68** | **88** | **544** |
+
+**CLS64 now trails the scalar row instead of leading it** — 68 against RISC-V's
+55, AArch64's 61 and x86-64's 60. That is the correct outcome and the reason the
+fix is worth having: the old 11 was the fused engine's number wearing a scalar
+label, and a comparison in which the subject's own row is not what its label says
+is not a comparison. The batch row keeps CLS64's one genuine result (4 retired
+against 52–60) and is untouched.
+
+What may now be said, replacing the may-say list above:
+
+- **May be said:** written as a per-element loop, CLS64's scalar row retires MORE
+  instructions than any of the other three, because every CLS64 instruction is a
+  fixed 8 bytes and its loop needs five instructions of bookkeeping per element.
+- **May be said:** CLS64's fused engine retires 4 instructions for the same
+  workload, and 8:1 is now a real algorithmic difference between two different
+  programs rather than an artefact of call granularity.
+- **May not be said:** anything about speed, cycles or silicon. The axis is still
+  retired instructions in a simulator, and the encoding-density axis remains
+  unmeasured for want of an ARM/RISC-V toolchain.
+
+Verified: `zig build crossarch` prints all 8 rows with no `!!` warnings, and the
+two "computes 5 in all 8 elements" tests pass for both shapes.
+
 ---
 
 ## F33: four ISAs executed by one measurement loop
@@ -1443,5 +1481,92 @@ correct sum. Before v1.17 that program could not be written at all.
 position, so a capability cannot be reconstructed — a §6 redesign, not a bug fix).
 The accelerators remain unwired: `matrix.zig`, `fft.zig` and `codec.zig` are
 imported by **no other file**, so `0x60`–`0x8F` decodes to an opaque payload and
-executes nothing. That is the next piece of the core, and it is why the
-cross-architecture table's CLS64 row still cannot be compared fairly.
+executes nothing. That is the next piece of the core before the example suite.
+
+*(Corrected in v1.18: this paragraph previously ended "and it is why the
+cross-architecture table's CLS64 row still cannot be compared fairly." That is no
+longer true — F32 is closed above by rewriting the CLS64 scalar row as a real loop.
+The unwired accelerators are still a real gap, but they no longer block the
+comparison, and the CLS64 row is now comparable and worst-of-four on it.)*
+
+---
+
+## F35: labels (v1.18) — and two numbers that did not survive re-derivation
+
+Branch and jump targets were numeric byte offsets only, so a loop written by hand
+required counting instructions and writing the magic number; any edit above the
+target silently changed its meaning. `assembleSource` now resolves labels in three
+passes (collect definitions and reject duplicates, assemble while recording
+unresolved references, then patch now that every address is known). `branch` gets a
+PC-relative signed 28-bit delta **from the branch instruction itself** (§3.0.1);
+`jump`/`call` get an absolute 48-bit address. `splitLabel` is shared by passes 1
+and 2 so the two cannot drift about which lines emit an instruction.
+
+### Two corrections, recorded in place
+
+Two numbers were inherited from the previous session and both were wrong. Neither
+was a defect in the label implementation — which is why re-deriving them mattered,
+since either could have been "fixed" by bending the product to match a wrong
+number:
+
+1. **The handoff's byte-identity claim holds, but the by-hand numbers behind it are
+   easy to get wrong — demonstrated by getting them wrong.** The handoff states the
+   label program "assembles to the same 12 words as the numeric-offset equivalent"
+   and that both halt after 63 instructions. It never prints that numeric program,
+   so the claim was reproduced rather than trusted.
+
+   The first reproduction **faulted**, which briefly looked like a label bug. It was
+   not: the transcribed program used a branch delta of `80` and `jump 24`, sending
+   the exit past the 96-byte image and the back-edge to the setup word instead of
+   the loop head. The label path assembles to a branch delta of `48` (branch at
+   address 40 → `done` at 88) and an absolute jump of `32` (`loop`, instruction 4).
+
+   So the finding is narrower than it first appeared and is about the *old*
+   workflow, not a defect: two hand-counted numbers produced a program that does not
+   run, on the first attempt, by an agent that had just read the encoding rules.
+   Against the corrected numeric program the images are byte-identical (`cmp` clean)
+   and both halt after 63 simulated instructions — the label implementation is
+   correct and the handoff's claim is confirmed.
+2. **The pre-existing test asserted `-16` for the backward branch; the correct value
+   is `-8`.** The failing test carried over from the previous session expected `-16`.
+   The encoder computes `target_addr - branch_addr`, so for `top: nop; branch
+   R0,[EQUAL],top` the branch sits at address 8 and `top` at address 0, giving
+   `0 - 8 = -8`. Re-deriving it from the encoder rather than from the neighbouring
+   test changed the expected value. The assertion is load-bearing: setting it back
+   to `-16` fails with `expected -16, found -8`. (The `-16` looks like it came from
+   the target-minus-next-instruction convention, which this ISA does not use.)
+
+   *A process note worth keeping: an intermediate draft of this section attributed
+   both wrong numbers to the handoff. `-16` appears nowhere in HANDOFF.md, and the
+   handoff never printed a numeric program at all. The two wrong numbers were the
+   previous session's test data and this session's own first transcription. The
+   attribution was corrected before this text was committed, which is the only
+   reason the section is not itself a fabricated finding.*
+
+### A trap worth recording, because the obvious fix is the dangerous one
+
+The test helper returns `Program`, **not** the `[]u64` slice that seemed natural:
+
+- `assembleSource` returns a *value copy* of its `ArenaAllocator`, and that copy
+  shares the same node list. Deinit-ing both the returned `Program` and the
+  assembler therefore frees one list twice — a double free on the **success** path,
+  which aborts. The pre-existing comment at the "line that is only a label" test
+  records the same trap.
+- Returning `prog.words` instead is *also* unsafe, more subtly: it is the live
+  `ArrayList` buffer, and Zig 0.17's `ArenaAllocator` can **move** an existing
+  allocation when it grows the same node. A stale slice then reads back `0xAAAA…`
+  poison rather than the word. "The words are arena-owned" does not make a slice
+  safe.
+
+The helper frees the arena exactly once on both the success and failure paths.
+
+### Verification
+
+```
+zig build test (cold cache)   -> 49/49 steps, 570/570 tests, exit 0
+labels filter                 -> 8/8 pass
+byte identity                 -> label image vs corrected numeric image, cmp clean
+decoder fuzz round trip       -> checked=11839 identical=11839, 0 mismatches
+reserved-field audit          -> 9/9 enforcement points, all 9 rejected when set
+live-check                    -> all 232 recorded facts still reproduce
+```
