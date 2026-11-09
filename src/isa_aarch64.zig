@@ -2,10 +2,11 @@
 //! cross-architecture comparison.
 //!
 //! SCOPE. Fixed 32-bit instructions, the integer subset the comparison workload
-//! needs: ADD/SUB (immediate and shifted-register), MOV, LDR/STR, CMP, B.cond,
-//! B, RET, NOP. No SIMD, no floating point, no atomics, no exception levels, no
-//! system registers. The encodings implemented here are checked byte-for-byte
-//! against LLVM's integrated assembler in the oracle tests at the bottom.
+//! needs: ADD/SUB (immediate and shifted-register), MADD/MSUB, MOV, LDR/STR (both
+//! the unsigned-immediate and register-offset forms), CMP, B.cond, B, RET, NOP.
+//! No SIMD, no floating point, no atomics, no exception levels, no system
+//! registers. The encodings implemented here are checked byte-for-byte against
+//! LLVM's integrated assembler in the oracle tests at the bottom.
 //!
 //! WHY THESE INSTRUCTIONS. The comparison measures the SAME workload on every
 //! ISA. Anything not needed for that workload is left out rather than guessed
@@ -108,6 +109,17 @@ pub const Cpu = struct {
         // Add/subtract (shifted register): ADD/SUB/CMP. 0x8B / 0xCB / 0xEB.
         if ((insn & 0x1F200000) == 0x0B000000) return self.addSubReg(insn);
 
+        // Data-processing (3 source): MADD/MSUB. The mask must pin bit 15, which
+        // separates the 3-source group from the shifted-register group above —
+        // MADD is 0x9B, not 0x8B, and its bits [28:24] are 11011. `mul Rd, Rn,
+        // Rm` is `madd Rd, Rn, Rm, XZR`, so one arm serves both.
+        if ((insn & 0x1F000000) == 0x1B000000) return self.madd(insn);
+
+        // Load/store register offset: LDR/STR Rt, [Rn, Rm]. Bits [29:27] = 111,
+        // [25:24] = 00, [21] = 1. This is the form a matrix kernel wants, because
+        // the element offset is a scaled INDEX rather than a constant.
+        if ((insn & 0x3B200C00) == 0x38200800) return self.loadStoreReg(insn);
+
         // MOV (wide immediate): MOVZ/MOVN. 0x52800000 / 0x12800000 patterns.
         if ((insn & 0x1F800000) == 0x12800000) return self.moveWide(insn);
 
@@ -171,6 +183,64 @@ pub const Cpu = struct {
 
         if (s == 1) self.setFlags(a, bb, masked, op == 1, sf == 1);
         self.write(rd, masked);
+    }
+
+    /// MADD/MSUB: `Rd = Ra + (Rn * Rm)` or `Rd = Ra - (Rn * Rm)`.
+    ///
+    /// `mul Rd, Rn, Rm` is the same encoding with Ra = XZR, which is why LLVM
+    /// renders `madd x1, x2, x3, xzr` back as `mul x1, x2, x3` — the two mnemonics
+    /// are one instruction. Both are accepted here.
+    ///
+    /// Only the 64-bit (sf = 1) form is implemented. The 32-bit form is the same
+    /// opcode with bit 31 clear; it is refused rather than silently treated as
+    /// 64-bit, which would produce a wrong product for any operand above 2^32.
+    fn madd(self: *Cpu, insn: u32) !void {
+        if (((insn >> 31) & 1) != 1) return error.UnsupportedWidth;
+        const rm: u5 = @truncate(insn >> 16);
+        const ra: u5 = @truncate(insn >> 10);
+        const rn: u5 = @truncate(insn >> 5);
+        const rd: u5 = @truncate(insn);
+        const is_sub = ((insn >> 15) & 1) == 1; // 0 = MADD, 1 = MSUB
+
+        const product = self.read(rn) *% self.read(rm);
+        const acc = self.read(ra);
+        self.write(rd, if (is_sub) acc -% product else acc +% product);
+    }
+
+    /// LDR/STR (register offset), with the option bits [15:13] honoured for the
+    /// shift used by LSL. The workload uses shift = 0 only; a non-zero shift is
+    /// applied rather than ignored, because ignoring it reads the wrong element
+    /// silently. Extend options (UXTW/SXTW etc.) are refused: they change the
+    /// meaning of the index and are not needed here.
+    fn loadStoreReg(self: *Cpu, insn: u32) !void {
+        const size: u3 = @truncate((insn >> 30) & 3);
+        const is_load = ((insn >> 22) & 1) == 1;
+        const option: u3 = @truncate((insn >> 13) & 7);
+        const s = (insn >> 12) & 1;
+        const rm: u5 = @truncate(insn >> 16);
+        const rn: u5 = @truncate(insn >> 5);
+        const rt: u5 = @truncate(insn);
+
+        // option 011 is LSL; the extension options are 010/110 (UXTW/SXTW) and
+        // their 64-bit forms, which this subset does not implement.
+        if (option != 0b011) return error.UnsupportedExtend;
+
+        const scale: u6 = @as(u6, 1) << size; // 1, 2, 4 or 8
+        const amount: u6 = if (s == 1) size else 0;
+        const index = self.read(rm) << @intCast(amount);
+        const addr = self.read(rn) +% index;
+        if (is_load) {
+            const raw = try self.load(addr, scale);
+            self.write(rt, switch (size) {
+                0 => @as(u8, @truncate(raw)),
+                1 => @as(u16, @truncate(raw)),
+                2 => @as(u32, @truncate(raw)),
+                3 => raw,
+                else => unreachable,
+            });
+        } else {
+            try self.store(addr, scale, self.read(rt));
+        }
     }
 
     fn moveWide(self: *Cpu, insn: u32) !void {
@@ -322,6 +392,27 @@ pub fn ldr(rt: u5, rn: u5, off: u12) u32 {
 }
 pub fn str(rt: u5, rn: u5, off: u12) u32 {
     return 0xF9000000 | (@as(u32, off) << 10) | (@as(u32, rn) << 5) | rt;
+}
+/// `madd rd, rn, rm, ra` — 64-bit, bits [31:29] = 001 and bits [28:24] = 11011.
+/// Verified against LLVM: `madd x0, x1, x2, x3` is 0x9B030220.
+pub fn madd(rd: u5, rn: u5, rm: u5, ra: u5) u32 {
+    return 0x9B000000 | (@as(u32, rm) << 16) | (@as(u32, ra) << 10) | (@as(u32, rn) << 5) | rd;
+}
+/// `mul rd, rn, rm` is `madd rd, rn, rm, xzr`. Kept as its own name because that
+/// is how a reader writes it, but there is only one encoding.
+pub fn mul(rd: u5, rn: u5, rm: u5) u32 {
+    return madd(rd, rn, rm, 31);
+}
+/// `ldr rt, [rn, rm]` — register offset, no shift, 64-bit (size = 3).
+/// LLVM: `ldr x1, [x2, x3]` is 0xF8636841. Bits [15:13] = 011 (LSL) are part of
+/// the base; leaving bit 14 clear encodes a different option and would decode as
+/// a rejected extend.
+pub fn ldrReg(rt: u5, rn: u5, rm: u5) u32 {
+    return 0xF8606800 | (@as(u32, rm) << 16) | (@as(u32, rn) << 5) | rt;
+}
+/// `str rt, [rn, rm]` — register offset, no shift, 64-bit.
+pub fn strReg(rt: u5, rn: u5, rm: u5) u32 {
+    return 0xF8206800 | (@as(u32, rm) << 16) | (@as(u32, rn) << 5) | rt;
 }
 pub fn movz(rd: u5, imm16: u16, hw: u2) u32 {
     return 0xD2800000 | (@as(u32, hw) << 21) | (@as(u32, imm16) << 5) | rd;
@@ -501,4 +592,91 @@ test "ORACLE: a negative B.cond offset decodes as negative" {
     cpu.pc = 100;
     _ = try cpu.step();
     try testing.expectEqual(@as(u64, 92), cpu.pc);
+}
+
+// ---------------------------------------------------------------------------
+// Oracle tests: MADD/MUL and the register-offset loads, added for matmul_8x8
+// ---------------------------------------------------------------------------
+//
+// Recorded command and output for each row:
+//
+//   $ printf 'mul x1, x2, x3\nmadd x0, x1, x2, x3\nmadd x10, x11, x12, x10\nldr x1, [x2, x3]\nstr x1, [x2, x3]\n' \
+//       | llvm-mc -triple=aarch64 -show-encoding
+//           mul  x1, x2, x3            // encoding: [0x41,0x7c,0x03,0x9b]
+//           mul  x1, x2, x3            // encoding: [0x41,0x7c,0x03,0x9b]
+//           madd x0, x1, x2, x3        // encoding: [0x20,0x0c,0x02,0x9b]
+//           ldr  x1, [x2, x3]          // encoding: [0x41,0x68,0x63,0xf8]
+//           str  x1, [x2, x3]          // encoding: [0x41,0x68,0x23,0xf8]
+//
+// `madd x1, x2, x3, xzr` is REJECTED by llvm-mc as an invalid mnemonic and
+// printed back as `mul x1, x2, x3` — the two spellings are one encoding, which
+// is why `mul` here is defined as `madd ..., xzr`.
+
+test "ORACLE: the A64 multiply and register-offset encoders reproduce LLVM byte-for-byte" {
+    const cases = [_]struct { name: []const u8, mine: u32, llvm: u32 }{
+        .{ .name = "mul x1,x2,x3", .mine = mul(1, 2, 3), .llvm = 0x9B037C41 },
+        .{ .name = "madd x0,x1,x2,x3", .mine = madd(0, 1, 2, 3), .llvm = 0x9B020C20 },
+        .{ .name = "madd x10,x11,x12,x10", .mine = madd(10, 11, 12, 10), .llvm = 0x9B0C296A },
+        .{ .name = "ldr x1,[x2,x3]", .mine = ldrReg(1, 2, 3), .llvm = 0xF8636841 },
+        .{ .name = "str x1,[x2,x3]", .mine = strReg(1, 2, 3), .llvm = 0xF8236841 },
+    };
+    for (cases) |c| {
+        testing.expectEqual(c.llvm, c.mine) catch |e| {
+            std.debug.print("ORACLE MISMATCH for {s}: mine=0x{X:0>8} llvm=0x{X:0>8}\n", .{ c.name, c.mine, c.llvm });
+            return e;
+        };
+    }
+}
+
+test "ORACLE: LLVM's own mul/madd bytes decode to the operands the assembly names" {
+    // Both encodings are run back to back, so the assertions are chained rather
+    // than chosen for one instruction: the second reads what the first wrote,
+    // which is what a real dependency looks like. A decoder that mixed up Rd, Rn
+    // and Ra fails one of them.
+    //
+    //   0x9B037C41 = mul  x1, x2, x3          x1 = 6 * 7   = 42
+    //   0x9B020C20 = madd x0, x1, x2, x3      x0 = 5 + 42*7 = 299
+    const img = try image(&.{ 0x9B037C41, 0x9B020C20 });
+    defer testing.allocator.free(img);
+    var cpu = Cpu.init(img);
+    cpu.write(2, 6);
+    cpu.write(3, 7);
+    cpu.write(1, 5); // the MADD addend source is x1's OLD value only if Rd != Ra
+    _ = try cpu.step();
+    try testing.expectEqual(@as(u64, 42), cpu.read(1));
+    _ = try cpu.step();
+    // madd x0, x1, x2, x3 with x1 = 42 now, x2 = 6, x3 = 7 -> 42 * 6 + 7 = 259.
+    try testing.expectEqual(@as(u64, 259), cpu.read(0));
+}
+
+test "ORACLE: LLVM's register-offset load and store bytes move the indexed element" {
+    // 0xF8636841 = ldr x1, [x2, x3] ; 0xF8236841 = str x1, [x2, x3]
+    // Both are placed after a movz so the base and index come from instructions
+    // rather than from the test's own writes, which is what a program would do.
+    const img = try image(&.{ 0xF8636841, 0xF8236841 }); // ldr x1,[x2,x3] ; str x1,[x2,x3]
+    defer testing.allocator.free(img);
+    var cpu = Cpu.init(img);
+    cpu.write(2, 200); // base
+    cpu.write(3, 4); // index
+    std.mem.writeInt(u64, img[204..212], 0x5150, .little); // [x2 + x3]
+    _ = try cpu.step();
+    try testing.expectEqual(@as(u64, 0x5150), cpu.read(1));
+    cpu.write(1, 0xABCD);
+    _ = try cpu.step();
+    try testing.expectEqual(@as(u64, 0xABCD), std.mem.readInt(u64, img[204..212], .little));
+}
+
+test "madd and mul compute the product, and the MSUB bit subtracts" {
+    const img = try image(&.{
+        movz(1, 6, 0),
+        movz(2, 7, 0),
+        movz(3, 5, 0),
+        madd(0, 1, 2, 3), // x0 = 5 + 6*7 = 47
+        mul(4, 1, 2), // x4 = 6*7 = 42
+    });
+    defer testing.allocator.free(img);
+    var cpu = Cpu.init(img);
+    for (0..5) |_| _ = try cpu.step();
+    try testing.expectEqual(@as(u64, 47), cpu.read(0));
+    try testing.expectEqual(@as(u64, 42), cpu.read(4));
 }

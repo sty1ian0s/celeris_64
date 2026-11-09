@@ -2,7 +2,8 @@
 //! cross-architecture comparison.
 //!
 //! SCOPE. The integer subset the comparison workload needs, in 64-bit mode:
-//! MOV (immediate and register/memory), ADD/SUB/CMP/TEST, INC/DEC, LEA, Jcc with
+//! MOV (immediate and register/memory), ADD/SUB/CMP/TEST, INC/DEC, IMUL (the
+//! 0F AF two-operand form and the 69/6B three-operand form), MOVZX, LEA, Jcc with
 //! rel8/rel32, CALL/RET, PUSH/POP, NOP. No SIMD, no x87, no floating point, no
 //! privilege transitions, no segmentation beyond the flat model, no REX.W-less
 //! 32-bit quirks beyond those exercised here.
@@ -206,6 +207,24 @@ pub const Cpu = struct {
                         self.pc = self.pc +% @as(u64, @bitCast(@as(i64, rel)));
                         self.branched = true;
                     }
+                } else if (op2 == 0xAF) {
+                    // IMUL r64, r/m64 — the two-operand form. Flags are set, but
+                    // only CF/OF carry meaning (product truncated); the workload
+                    // never reads them, so they are computed rather than skipped.
+                    const modrm = try self.fetch8();
+                    const dest = try self.twoOperandRm(modrm, rex_r, rex_b, rex_x, 8);
+                    const a = self.regs[dest.reg];
+                    const b = dest.value;
+                    self.regs[dest.reg] = self.truncateTo(a *% b, dest.size);
+                    self.setImulFlags(a, b, dest.size);
+                } else if (op2 == 0xB6 or op2 == 0xB7) {
+                    // MOVZX r32/r64, r/m8 or r/m16 — zero-extend. `movzbl (%rax),
+                    // %ecx` is how a byte is lifted out of a buffer without the
+                    // sign extension MOVSX would apply.
+                    const src_size: u6 = if (op2 == 0xB6) 1 else 2;
+                    const modrm = try self.fetch8();
+                    const dest = try self.twoOperandRm(modrm, rex_r, rex_b, rex_x, src_size);
+                    self.regs[dest.reg] = self.truncateTo(dest.value, dest.size);
                 } else return error.UnsupportedTwoByteOpcode;
             },
             0xE8 => { // CALL rel32
@@ -351,6 +370,26 @@ pub const Cpu = struct {
                     5, 7 => self.setSubFlags(a_val, b_val, masked, size),
                     else => {},
                 }
+            },
+            0x69, 0x6B => { // IMUL r, r/m, imm32 / imm8 — the three-operand form
+                const modrm = try self.fetch8();
+                const mod: u2 = @truncate(modrm >> 6);
+                const reg: u4 = @truncate(((modrm >> 3) & 7) + (@as(u8, rex_r) << 3));
+                const rm: u4 = @truncate((modrm & 7) + (@as(u8, rex_b) << 3));
+                const size: u6 = if (rex_w) 8 else if (operand_16) 2 else 4;
+                const imm: u64 = if (op == 0x6B)
+                    @as(u8, @bitCast(@as(i8, @bitCast(try self.fetch8()))))
+                else
+                    try self.fetchBits(4);
+                const src: u64 = if (mod == 3)
+                    self.truncateTo(self.regs[rm], size)
+                else blk: {
+                    const addr = try self.modrmAddress(modrm, mod, rex_b, rex_x);
+                    break :blk try self.load(addr, size);
+                };
+                const imm_t = self.truncateTo(imm, size);
+                self.regs[reg] = self.truncateTo(src *% imm_t, size);
+                self.setImulFlags(src, imm_t, size);
             },
             0xC7 => { // group 11: MOV r/m16/32/64, imm
                 const modrm = try self.fetch8();
@@ -535,6 +574,35 @@ pub const Cpu = struct {
             }
         }
         return base;
+    }
+
+    /// Decodes a ModRM byte for the two-operand 0F-prefixed forms, where the
+    /// destination is ModRM.reg and the SOURCE is r/m — the operand order that
+    /// differs from the group-1 ALU forms and is the usual place to get it
+    /// backwards (IMUL r, r/m is `reg = reg * rm`, not the reverse).
+    const RmOperand = struct { reg: u4, value: u64, size: u6 };
+
+    fn twoOperandRm(self: *Cpu, modrm: u8, rex_r: u1, rex_b: u1, rex_x: u1, size: u6) !RmOperand {
+        const mod: u2 = @truncate(modrm >> 6);
+        const reg: u4 = @truncate(((modrm >> 3) & 7) + (@as(u8, rex_r) << 3));
+        const rm: u4 = @truncate((modrm & 7) + (@as(u8, rex_b) << 3));
+        if (mod == 3) {
+            return .{ .reg = reg, .value = self.truncateTo(self.regs[rm], size), .size = size };
+        }
+        const addr = try self.modrmAddress(modrm, mod, rex_b, rex_x);
+        return .{ .reg = reg, .value = try self.load(addr, size), .size = size };
+    }
+
+    /// IMUL is the one integer multiply that sets CF/OF to "the result fit in the
+    /// destination width" rather than to a carry or an overflow of the addition.
+    /// Parity, AF and ZF are architecturally undefined; they are left alone here
+    /// rather than set to a value a reader might mistake for meaningful.
+    fn setImulFlags(self: *Cpu, a: u64, b: u64, size: u6) void {
+        const bits: u7 = @as(u7, size) * 8;
+        const wide: u128 = @as(u128, a) * @as(u128, b);
+        const fits: bool = (wide >> @intCast(bits)) == 0;
+        self.setFlag(cf, !fits);
+        self.setFlag(of, !fits);
     }
 
     fn setAddFlags(self: *Cpu, a: u64, b: u64, res: u64, size: u6) void {
@@ -777,19 +845,27 @@ test "ORACLE: LLVM's own x86-64 bytes decode and execute correctly" {
                 try testing.expectEqual(@as(u64, 5), c.read(0));
             }
         }.f },
-        .{ .name = "addq %rcx, %rax", .bytes = &.{ 0x48, 0x01, 0xC8 }, .check = struct {
-            fn f(c: *Cpu) anyerror!void {
-                try testing.expectEqual(@as(u64, 50), c.read(0)); // 45 + 5
-            }
-        }.f },
-        .{ .name = "movq (%rbx), %rdx", .bytes = &.{ 0x48, 0x8B, 0x13 }, .check = struct {
-            fn f(c: *Cpu) anyerror!void {
-                // Memory at [rbx] is 77 and rdx starts at 0 for this case (the
-                // harness sets 0 before the load cases), so a decoder that did
-                // nothing would leave 0 here and fail.
-                try testing.expectEqual(@as(u64, 77), c.read(2));
-            }
-        }.f },
+        .{
+            .name = "addq %rcx, %rax",
+            .bytes = &.{ 0x48, 0x01, 0xC8 },
+            .check = struct {
+                fn f(c: *Cpu) anyerror!void {
+                    try testing.expectEqual(@as(u64, 50), c.read(0)); // 45 + 5
+                }
+            }.f,
+        },
+        .{
+            .name = "movq (%rbx), %rdx",
+            .bytes = &.{ 0x48, 0x8B, 0x13 },
+            .check = struct {
+                fn f(c: *Cpu) anyerror!void {
+                    // Memory at [rbx] is 77 and rdx starts at 0 for this case (the
+                    // harness sets 0 before the load cases), so a decoder that did
+                    // nothing would leave 0 here and fail.
+                    try testing.expectEqual(@as(u64, 77), c.read(2));
+                }
+            }.f,
+        },
         .{ .name = "movq %rdx, (%rbx)", .bytes = &.{ 0x48, 0x89, 0x13 }, .check = struct {
             fn f(c: *Cpu) anyerror!void {
                 try testing.expectEqual(@as(u64, 77), std.mem.readInt(u64, c.mem[200..208], .little));
@@ -899,4 +975,131 @@ test "REGRESSION: REX.R and REX.B select r8-r15, not r0-r7" {
     // The unnormalised form must not be reintroduced: a correct decoder reads
     // REX.R from bit 2 and REX.B from bit 0, and both are one bit wide.
     try testing.expect(@TypeOf(@as(u1, 0)) == u1);
+}
+
+// ---------------------------------------------------------------------------
+// Oracle tests: IMUL and MOVZX, added for matmul_8x8
+// ---------------------------------------------------------------------------
+//
+// Recorded command and output for each row:
+//
+//   $ printf 'imulq %%rcx, %%rax\nimulq %%r9, %%r8\nimulq (%%r10), %%r11\nimulq $0x40, %%r8, %%r9\nimulq $17, %%rcx, %%rdx\nmovzbl (%%rbx,%%rcx,1), %%eax\n' \
+//       | llvm-mc -triple=x86_64 -show-encoding
+//           imulq %rcx, %rax        # encoding: [0x48,0x0f,0xaf,0xc1]
+//           imulq %r9, %r8          # encoding: [0x4d,0x0f,0xaf,0xc1]
+//           imulq (%r10), %r11      # encoding: [0x4d,0x0f,0xaf,0x1a]
+//           imulq $64, %r8, %r9     # encoding: [0x4d,0x6b,0xc8,0x40]
+//           imulq $17, %rcx, %rdx   # encoding: [0x48,0x6b,0xd1,0x11]
+//           movzbl (%rbx,%rcx), %eax # encoding: [0x0f,0xb6,0x04,0x0b]
+//
+// The three extended-register rows are deliberate: F38 records that REX.R and
+// REX.B selected the wrong register for r8-r15 while every self-consistency
+// check agreed. These rows keep that path covered by LLVM's own bytes.
+
+test "ORACLE: the IMUL and MOVZX forms execute as LLVM's bytes say they do" {
+    const Case = struct { name: []const u8, bytes: []const u8, check: *const fn (*Cpu) anyerror!void };
+    const cases = [_]Case{
+        // imulq %rcx, %rax : rax = rax * rcx
+        .{ .name = "imulq %rcx, %rax", .bytes = &.{ 0x48, 0x0F, 0xAF, 0xC1 }, .check = struct {
+            fn f(c: *Cpu) anyerror!void {
+                try testing.expectEqual(@as(u64, 6 * 7), c.read(0));
+            }
+        }.f },
+        // imulq %r9, %r8 : REX.R + REX.B -- BOTH extended bits at once
+        .{
+            .name = "imulq %r9, %r8",
+            .bytes = &.{ 0x4D, 0x0F, 0xAF, 0xC1 },
+            .check = struct {
+                fn f(c: *Cpu) anyerror!void {
+                    try testing.expectEqual(@as(u64, 3 * 9), c.read(8)); // r8 = r8 * r9
+                    try testing.expectEqual(@as(u64, 9), c.read(9)); // r9 untouched
+                }
+            }.f,
+        },
+        // imulq (%r10), %r11 : REX.R + REX.B with a MEMORY source operand
+        .{
+            .name = "imulq (%r10), %r11",
+            .bytes = &.{ 0x4D, 0x0F, 0xAF, 0x1A },
+            .check = struct {
+                fn f(c: *Cpu) anyerror!void {
+                    try testing.expectEqual(@as(u64, 5 * 3), c.read(11));
+                    try testing.expectEqual(@as(u64, 0x80), c.read(10)); // r10 untouched
+                }
+            }.f,
+        },
+        // imulq $64, %r8, %r9 : the three-operand form, imm8 sign-extended
+        .{
+            .name = "imulq $64, %r8, %r9",
+            .bytes = &.{ 0x4D, 0x6B, 0xC8, 0x40 },
+            .check = struct {
+                fn f(c: *Cpu) anyerror!void {
+                    try testing.expectEqual(@as(u64, 3 * 64), c.read(9));
+                    try testing.expectEqual(@as(u64, 3), c.read(8)); // source preserved
+                }
+            }.f,
+        },
+        // imulq $17, %rcx, %rdx : three-operand, source NOT the destination
+        .{ .name = "imulq $17, %rcx, %rdx", .bytes = &.{ 0x48, 0x6B, 0xD1, 0x11 }, .check = struct {
+            fn f(c: *Cpu) anyerror!void {
+                try testing.expectEqual(@as(u64, 7 * 17), c.read(2));
+                try testing.expectEqual(@as(u64, 7), c.read(1));
+            }
+        }.f },
+        // movzbl (%rbx,%rcx), %eax : byte load, ZERO-extended into the full register
+        .{
+            .name = "movzbl (%rbx,%rcx), %eax",
+            .bytes = &.{ 0x0F, 0xB6, 0x04, 0x0B },
+            .check = struct {
+                fn f(c: *Cpu) anyerror!void {
+                    try testing.expectEqual(@as(u64, 0x80), c.read(0)); // 0x80, not 0xFFFF..80
+                }
+            }.f,
+        },
+    };
+    for (cases) |c| {
+        const img = try image(c.bytes);
+        defer testing.allocator.free(img);
+        var cpu = Cpu.init(img);
+        cpu.write(0, 6); // rax
+        cpu.write(1, 7); // rcx -- also the movzbl index
+        cpu.write(2, 0xFFFF); // rdx: a 16-bit value that must be REPLACED
+        cpu.write(8, 3); // r8
+        cpu.write(9, 9); // r9
+        cpu.write(10, 0x80); // r10 = the address of the memory operand
+        cpu.write(11, 5); // r11
+        cpu.write(3, 0x200); // rbx = the movzbl base
+        std.mem.writeInt(u64, img[0x80..0x88], 3, .little); // [r10] = 3
+        img[0x200 + 7] = 0x80; // [rbx + rcx] = 0x80, a byte whose top bit is SET
+        const len = try cpu.step();
+        testing.expectEqual(@as(u64, c.bytes.len), len) catch |e| {
+            std.debug.print("ORACLE LENGTH MISMATCH for {s}: LLVM {d}, decoder {d}\n", .{ c.name, c.bytes.len, len });
+            return e;
+        };
+        c.check(&cpu) catch |e| {
+            std.debug.print("ORACLE FAILURE for {s}\n", .{c.name});
+            return e;
+        };
+    }
+}
+
+test "REGRESSION: IMUL sets CF/OF only when the product does not fit" {
+    // IMUL is the one multiply whose CF/OF mean "the result fit", unlike ADD's
+    // carry. 3 * 4 fits in 64 bits; 2^32 * 2^32 does not.
+    const img = try image(&.{
+        0x48, 0x0F, 0xAF, 0xC1, // imulq %rcx, %rax  -- rax = 3, rcx = 4
+        0x48, 0x0F, 0xAF, 0xC6, // imulq %rsi, %rax  -- rax = 2^40, rsi = 2^40
+    });
+    defer testing.allocator.free(img);
+    var cpu = Cpu.init(img);
+    cpu.write(0, 3); // rax
+    cpu.write(1, 4); // rcx
+    _ = try cpu.step();
+    try testing.expectEqual(@as(u64, 12), cpu.read(0));
+    try testing.expect(((cpu.flags >> 0) & 1) == 0); // CF clear: it fit
+    try testing.expect(((cpu.flags >> 11) & 1) == 0); // OF clear: it fit
+    cpu.write(0, 0x100_0000_0000); // rax = 2^40
+    cpu.write(6, 0x100_0000_0000); // rsi = 2^40; the product 2^80 does not fit
+    _ = try cpu.step();
+    try testing.expect(((cpu.flags >> 0) & 1) == 1); // CF set: it overflowed
+    try testing.expect(((cpu.flags >> 11) & 1) == 1); // OF set
 }

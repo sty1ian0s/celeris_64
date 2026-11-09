@@ -173,7 +173,7 @@ pub const examples = [_]Example{
     //     earlier revision left `.expected_win` in place and printed WRONG, which then
     //     turned out to be a verdict-logic defect as well as a falsified prediction —
     //     see the WIN/loss note in the report function.
-    // 
+    //
     //     WHY IT LOST, stated rather than tuned away: a count nobody can falsify proves
     //     nothing, so all four programs must ALSO sum the array - a skipped or repeated
     //     element has to change the answer - and that reduction is 256 scalar iterations
@@ -218,7 +218,7 @@ pub const examples = [_]Example{
         \\done:
         \\store R4, [R11+0]
         \\halt
-,
+        ,
         .riscv = &.{
             0x00002537, 0x00500613, 0x10000693, 0x00000593, 0x00053703, 0x00C70733,
             0x00E53023, 0x00E585B3, 0x00850513, 0xFFF68693, 0xFE0694E3, 0x000027B7,
@@ -282,7 +282,7 @@ pub const examples = [_]Example{
         \\done:
         \\store R2, [R8+0]
         \\halt
-,
+        ,
         .riscv = &.{
             0x00002537, 0x000027B7, 0x10078793, 0x00000593, 0x10000613, 0x00054683,
             0x00154703, 0x00E6B733, 0x00E585B3, 0x00150513, 0xFFF60613, 0xFE0614E3,
@@ -336,7 +336,7 @@ pub const examples = [_]Example{
         \\done:
         \\store R2, [R5+0]
         \\halt
-,
+        ,
         .riscv = &.{
             0x00700513, 0x00000593, 0x00000613, 0x3E800693, 0x00A585B3, 0x00160613,
             0xFED61CE3, 0x00002837, 0x10080813, 0x00B83023, 0x05D00893, 0x00000073,
@@ -389,7 +389,7 @@ pub const examples = [_]Example{
         \\done:
         \\store R2, [R5+0]
         \\halt
-,
+        ,
         .riscv = &.{
             0x00002537, 0x000027B7, 0x10078793, 0x00000593, 0x10000613, 0x00054683,
             0x00D585B3, 0x00150513, 0xFFF60613, 0xFE0618E3, 0x00B7B023, 0x05D00893,
@@ -442,7 +442,7 @@ pub const examples = [_]Example{
         \\done:
         \\store R2, [R5+0]
         \\halt
-,
+        ,
         .riscv = &.{
             0x00002537, 0x000027B7, 0x10078793, 0x00000593, 0x10000613, 0x00053683,
             0x00D585B3, 0x00850513, 0xFFF60613, 0xFE0618E3, 0x00B7B023, 0x05D00893,
@@ -499,7 +499,7 @@ pub const examples = [_]Example{
         \\done:
         \\store R2, [R5+0]
         \\halt
-,
+        ,
         .riscv = &.{
             0x00002537, 0x000027B7, 0x10078793, 0x00000593, 0x00000613, 0x00100693,
             0x00B69693, 0x00053703, 0x00E585B3, 0x04050513, 0x04060613, 0xFED618E3,
@@ -519,6 +519,136 @@ pub const examples = [_]Example{
         .answer = 11974149686891857037,
     },
 
+    // ====================================================================
+    // matmul_8x8
+    // ====================================================================
+    // WHY IT IS HERE, AND WHY CLS64 IS EXPECTED TO LOSE: a genuinely LARGER kernel
+    //     than the other six. An 8x8 integer matrix multiply is 512 multiply-accumulate
+    //     operations, and every ISA here has to walk them with a triple-nested loop;
+    //     what differs is the ADDRESS ARITHMETIC around the one `mul` in the innermost
+    //     body. x86-64 folds `i*8` and `j*8` into its addressing modes and reaches the
+    //     second operand through `imulq (%r10), %r11`, so its inner loop is 8
+    //     instructions. AArch64 and RISC-V each need a `mul` for the byte offset but
+    //     can fold the add into the same instruction. CLS64 has no scaled-index
+    //     addressing at all, so every element address is `mov` + `mul` + `add` — three
+    //     instructions where the others pay zero or one — and the same is true of the
+    //     loop control, where `branch` cannot fall out of the loop and needs a `jump`.
+    //
+    //     CLS64 does NOT use `matrix.mul` (0x62) here, and that is deliberate rather
+    //     than a missed opportunity: §3.6's matrix accelerators are REFUSED by the
+    //     simulator (docs/STATUS.md F36), because the contract never says where a
+    //     matrix dimension, the output buffer or `count = 0` come from. Writing the
+    //     row with `matrix.mul` would compare a program that runs against three that
+    //     run and one that faults. The comparison is therefore scalar `mul` on all
+    //     four ISAs, which is the honest like-for-like.
+    //
+    //     This example is also what forced the two ISA decoders to grow: AArch64 had
+    //     no multiply at all, and x86-64 had no `imul`. Both were added for this
+    //     kernel and both are pinned against LLVM's own bytes in the oracle tests of
+    //     their own files. RISC-V needed nothing: `mul` is in the M extension, which
+    //     `src/isa_riscv.zig` already implements.
+    .{
+        .name = "matmul_8x8",
+        .what = "multiply two 8x8 matrices of 64-bit integers into a third (512 multiply-accumulates)",
+        .expectation = .expected_loss,
+        .data = word_data,
+        .cls64 =
+        \\# 8x8 i64 matrix multiply: C = A x B, row major.
+        \\# A at 0x2400 (9216), B at 0x2600 (9728), C at 0x2100 (8448).
+        \\# Each 8x8 i64 matrix is 512 bytes, so these do not overlap, and C starts
+        \\# exactly at the result slot (8448) that every example in this suite stores to.
+        \\#
+        \\# CLS64 has no scaled-index addressing mode: an element address is built from i,
+        \\# j and k with a `mul` by the byte stride (64 for a row, 8 for a column step).
+        \\# That cost is the architecture's, not a mistake in the program.
+        \\#
+        \\# Registers, all twelve of them:
+        \\#   R1 A base   R2 B base   R3 C base   R4 i   R5 j   R6 k
+        \\#   R7 &A[i][k]  R8 &B[k][j]  R9 acc  R10/R11 operands
+        \\mov R1, 9216          # A
+        \\mov R2, 9728          # B
+        \\mov R3, 8448          # C
+        \\mov R4, 0             # i = 0
+        \\i_loop:
+        \\mov R5, 0             # j = 0
+        \\j_loop:
+        \\mov R9, 0             # acc = 0
+        \\mov R6, 0             # k = 0
+        \\k_loop:
+        \\# R7 = A + i*64 + k*8
+        \\mov R7, R4
+        \\mul R7, R7, 64
+        \\mov R10, R6
+        \\mul R10, R10, 8
+        \\add R7, R7, R10
+        \\add R7, R7, R1
+        \\# R8 = B + k*64 + j*8
+        \\mov R8, R6
+        \\mul R8, R8, 64
+        \\mov R11, R5
+        \\mul R11, R11, 8
+        \\add R8, R8, R11
+        \\add R8, R8, R2
+        \\# acc += A[i][k] * B[k][j]
+        \\load R10, [R7+0]
+        \\load R11, [R8+0]
+        \\mul R10, R10, R11
+        \\add R9, R9, R10
+        \\add R6, R6, 1         # k++
+        \\compare R10, R6, 8
+        \\branch R10, [EQUAL], k_done
+        \\jump k_loop
+        \\k_done:
+        \\# C[i][j] = acc   ->  C + i*64 + j*8
+        \\mov R7, R4
+        \\mul R7, R7, 64
+        \\mov R10, R5
+        \\mul R10, R10, 8
+        \\add R7, R7, R10
+        \\add R7, R7, R3
+        \\store R9, [R7+0]
+        \\add R5, R5, 1         # j++
+        \\compare R10, R5, 8
+        \\branch R10, [EQUAL], j_done
+        \\jump j_loop
+        \\j_done:
+        \\add R4, R4, 1         # i++
+        \\compare R10, R4, 8
+        \\branch R10, [EQUAL], done
+        \\jump i_loop
+        \\done:
+        \\halt
+        ,
+        .riscv = &.{
+            0x000020B7, 0x40008093, 0x00002137, 0x60010113, 0x000021B7, 0x10018193,
+            0x00800693, 0x04000713, 0x00800793, 0x00000213, 0x00000293, 0x00000513,
+            0x00000313, 0x02E203B3, 0x02F30833, 0x010383B3, 0x001383B3, 0x0003B583,
+            0x02E30433, 0x02F288B3, 0x01140433, 0x00240433, 0x00043603, 0x02C585B3,
+            0x00B50533, 0x00130313, 0xFCD316E3, 0x02E204B3, 0x02F28933, 0x012484B3,
+            0x003484B3, 0x00A4B023, 0x00128293, 0xFAD294E3, 0x00120213, 0xF8D21EE3,
+            0x00000073,
+        },
+        .aarch64 = &.{
+            0xD2848001, 0xD284C002, 0xD2842003, 0xD280010D, 0xD280080E, 0xD280010F,
+            0xD2800004, 0xD2800005, 0xD280000A, 0xD2800006, 0x9B0E7C87, 0x9B0F7CD0,
+            0x8B1000E7, 0x8B0100E7, 0xF94000EB, 0x9B0E7CC8, 0x9B0F7CB1, 0x8B110108,
+            0x8B020108, 0xF940010C, 0x9B0C296A, 0x910004C6, 0xEB0D00DF, 0x54FFFE61,
+            0x9B0E7C89, 0x9B0F7CB2, 0x8B120129, 0x8B030129, 0xF900012A, 0x910004A5,
+            0xEB0D00BF, 0x54FFFD21, 0x91000484, 0xEB0D009F, 0x54FFFCA1, 0x14000000,
+        },
+        .x86 = &.{
+            0x48, 0xC7, 0xC6, 0x00, 0x24, 0x00, 0x00, 0x48, 0xC7, 0xC7, 0x00, 0x26,
+            0x00, 0x00, 0x48, 0xC7, 0xC3, 0x00, 0x21, 0x00, 0x00, 0x49, 0xC7, 0xC5,
+            0x08, 0x00, 0x00, 0x00, 0x45, 0x31, 0xC0, 0x31, 0xD2, 0x31, 0xC9, 0x4D,
+            0x6B, 0xC8, 0x40, 0x49, 0x01, 0xF1, 0x4C, 0x8D, 0x14, 0xD7, 0x31, 0xC0,
+            0x4D, 0x8B, 0x19, 0x4D, 0x0F, 0xAF, 0x1A, 0x4C, 0x01, 0xD9, 0x49, 0x83,
+            0xC1, 0x08, 0x49, 0x83, 0xC2, 0x40, 0x48, 0xFF, 0xC0, 0x4C, 0x39, 0xE8,
+            0x75, 0xE6, 0x4D, 0x6B, 0xC8, 0x40, 0x49, 0x01, 0xD9, 0x49, 0x89, 0x0C,
+            0xD1, 0x48, 0xFF, 0xC2, 0x4C, 0x39, 0xEA, 0x75, 0xC4, 0x49, 0xFF, 0xC0,
+            0x4D, 0x39, 0xE8, 0x75, 0xBA, 0xEB, 0xFE,
+        },
+        .answer = 9548232127993293227,
+    },
 };
 
 // ---------------------------------------------------------------------------
@@ -564,6 +694,25 @@ pub fn answerFor(name: []const u8) u64 {
         var i: usize = 0;
         while (i < word_data.len) : (i += 64) acc +%= std.mem.readInt(u64, word_data[i..][0..8], .little);
         return acc;
+    }
+    if (std.mem.eql(u8, name, "matmul_8x8")) {
+        // A at data_base + 0x400, B at +0x600 and C at +0x100 -- each matrix is
+        // 8*8*8 = 512 bytes and they do not overlap. C starts exactly at
+        // `result_addr`, so the answer word read by the suite is C[0][0].
+        //
+        // The SUM is deliberately NOT the answer here: a single element would be a
+        // weaker check, but the whole C matrix is already compared byte for byte
+        // against every other ISA by `measureExample`, which is strictly stronger
+        // than a sum and catches a wrong element wherever it sits. What this
+        // function adds is the independent recomputation, so it returns the same
+        // single word the programs store -- C[0][0].
+        var c: u64 = 0;
+        for (0..8) |k| {
+            const a = std.mem.readInt(u64, word_data[0x400 + k * 8 ..][0..8], .little);
+            const b = std.mem.readInt(u64, word_data[0x600 + k * 64 ..][0..8], .little);
+            c +%= a *% b;
+        }
+        return c;
     }
     unreachable;
 }
@@ -1164,6 +1313,98 @@ test "a participant altered to compute something else is reported as NOT equival
         var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
         defer arena_state.deinit();
         try testing.expectError(error.NotEquivalent, measureExample(arena_state.allocator(), &ex));
+    }
+}
+
+test "MUTATION: the matmul equivalence check fails when one ISA multiplies differently" {
+    // The requirement is that the matmul check be LOAD-BEARING, not merely green.
+    // Each mutation below changes ONE participant's multiply so it computes a
+    // different matrix while still halting cleanly and still storing a plausible
+    // number in the answer slot. If `measureExample` accepted any of them the
+    // example would be worthless, so each is asserted to be REFUSED.
+    //
+    // The four mutations are the four ISAs' own multiply instructions, identified
+    // by the bytes LLVM produced for them:
+    //   CLS64   `mul R7, R7, 64`  -> a different constant
+    //   RISC-V  0x02E203B3 `mul x7, x4, x14`  -> the same instruction with the
+    //           byte 0x03 turned into 0x05, i.e. rd changed, not the operation
+    //   AArch64 0x9B0E7C87 `mul x7, x4, x14` -> 0x9B0F7C87 (Rm switched)
+    //   x86-64  the `imulq` opcode 0x0F 0xAF -> 0x0F 0xBE (a different source)
+    const ex = examples[6];
+    try testing.expectEqualStrings("matmul_8x8", ex.name);
+
+    // CLS64: multiply by a different row stride.
+    {
+        var e = ex;
+        const patched = try std.mem.replaceOwned(u8, testing.allocator, e.cls64, "mul R7, R7, 64", "mul R7, R7, 65");
+        defer testing.allocator.free(patched);
+        try testing.expect(!std.mem.eql(u8, patched, e.cls64));
+        e.cls64 = patched;
+        var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena_state.deinit();
+        try testing.expectError(error.NotEquivalent, measureExample(arena_state.allocator(), &e));
+    }
+
+    // RISC-V: change the multiply's destination register, so the product lands in
+    // the wrong place. 0x02E203B3 is `mul x7, x4, x14`; rd is bits [11:7].
+    {
+        var e = ex;
+        const words = try testing.allocator.dupe(u32, e.riscv);
+        defer testing.allocator.free(words);
+        var hit = false;
+        for (words) |*w| {
+            if (w.* == 0x02E203B3) {
+                w.* = 0x02E283B3; // rd = x7 -> x8
+                hit = true;
+            }
+        }
+        try testing.expect(hit);
+        e.riscv = words;
+        var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena_state.deinit();
+        try testing.expectError(error.NotEquivalent, measureExample(arena_state.allocator(), &e));
+    }
+
+    // AArch64: 0x9B0E7C87 is `mul x7, x4, x14`. Changing Rm from x14 to x15
+    // makes the product use the element stride as the row stride.
+    {
+        var e = ex;
+        const words = try testing.allocator.dupe(u32, e.aarch64);
+        defer testing.allocator.free(words);
+        var hit = false;
+        for (words) |*w| {
+            if (w.* == 0x9B0E7C87) {
+                w.* = 0x9B0F7C87; // Rm = x14 -> x15
+                hit = true;
+            }
+        }
+        try testing.expect(hit);
+        e.aarch64 = words;
+        var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena_state.deinit();
+        try testing.expectError(error.NotEquivalent, measureExample(arena_state.allocator(), &e));
+    }
+
+    // x86-64: turn the first `imulq` into `movsx`, which loads the same operand
+    // sign-extended instead of multiplying by it.
+    {
+        var e = ex;
+        const bytes = try testing.allocator.dupe(u8, e.x86);
+        defer testing.allocator.free(bytes);
+        var hit = false;
+        var i: usize = 0;
+        while (i + 3 < bytes.len) : (i += 1) {
+            if (bytes[i] == 0x4D and bytes[i + 1] == 0x0F and bytes[i + 2] == 0xAF) {
+                bytes[i + 2] = 0xBE; // imul -> movsx
+                hit = true;
+                break;
+            }
+        }
+        try testing.expect(hit);
+        e.x86 = bytes;
+        var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena_state.deinit();
+        try testing.expectError(error.NotEquivalent, measureExample(arena_state.allocator(), &e));
     }
 }
 
