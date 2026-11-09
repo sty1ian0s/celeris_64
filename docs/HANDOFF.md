@@ -8,23 +8,24 @@ running something; claims that were not observed are marked as such.
 ## 1. Repository state
 
 ```
-HEAD         66aee85  docs(status): F32 closed, F35 recorded, and one of our own drafts retracted
-remote       origin/main, IN SYNC as of 66aee85 (pushed)
+HEAD         875d65f  docs: the published tables still said 11 — corrected to 68
+remote       origin/main, IN SYNC as of 875d65f (pushed)
 working tree CLEAN
 ```
 
-Three commits landed this session, in this order:
+Four commits landed this session, in this order:
 
 | Commit | What |
 |---|---|
 | `07c0017` | `feat(asm)`: labels — branch/jump targets can be named (v1.18) |
 | `025af04` | `fix(crossarch)`: CLS64's "scalar" row is a real loop now (closes **F32**) |
 | `66aee85` | `docs(status)`: F32 closed, F35 recorded, one draft of ours retracted |
+| `875d65f` | `docs`: the published tables still said 11 — corrected to 68 |
 
 **The previous handoff's blocking item is done.** The dirty tree it described is
 committed, the 3 failing label tests pass, and the labels work is byte-verified.
 
-### Gates, all run on a cold cache at `66aee85`
+### Gates, all run on a cold cache at `875d65f`
 
 ```sh
 rm -rf .zig-cache && ~/.local/zig/zig build test --summary all
@@ -33,6 +34,7 @@ rm -rf .zig-cache && ~/.local/zig/zig build test --summary all
 ~/.local/zig/zig build crossarch   -> 8 rows, no !! warnings
 ~/.local/zig/zig build audit       -> 9/9 enforcement points, all 9 rejected when set
 ~/.local/zig/zig build live-check  -> all 232 recorded facts still reproduce
+~/.local/zig/zig build bench       -> output unchanged (still the chunk=1 program)
 fuzzer (inside build test)         -> checked=11839 identical=11839, 0 mismatches
 ```
 
@@ -84,8 +86,12 @@ CLS64 batch     4        (unchanged, 32 bytes)  <- still CLS64's real result
 ```
 
 This is the honest result, not a regression: the old 11 measured a fused sequence
-under a scalar label. `docs/comparison.md` §7 and `docs/fidelity.md` §3.4 were
-written against the old 4/11 pair — **they have not been updated yet** (§5 below).
+under a scalar label. `docs/comparison.md` §7/§8 and `docs/fidelity.md` §3.4 have
+now been corrected in place (commit `875d65f`), with the superseded text marked
+rather than deleted. `benchmarks/bench.zig` was **not** changed: its scalar path is
+still `chunk = 1` `stream.add`s, its F32 comment already says so, and its 11 is
+still the literal output of `zig build bench`. Do not read that 11 as CLS64's
+scalar-loop result — it is a fused sequence at `chunk = 1`.
 
 ---
 
@@ -142,12 +148,27 @@ Unchanged in priority from the old handoff, minus items 1 and 2:
 
 ---
 
-## 5. Known-stale documentation (do this before quoting the numbers)
+## 5. Documentation state
 
-- `docs/comparison.md` §7 and `docs/fidelity.md` §3.4 still describe the CLS64
-  scalar row as 11 retired / the 4-vs-11 pair. F32's closure changes that to 68.
-  STATUS.md has the new numbers; those two files do not.
-- `README.md` may quote the old crossarch table. It was not re-read this session.
+All published tables were reconciled with the code this session. The method used
+throughout: the superseded text is **marked in place**, not deleted, so a reader who
+saw the old number can find out what happened to it.
+
+- `docs/comparison.md` §8 table — CLS64 scalar `11/88` → `68/544`, with RISC-V's
+  `4.00` now marked as the best density on that row.
+- `docs/comparison.md` §7 — F32's finding kept as the historical record. §7.4 is
+  retitled ("could not be written *at the time*"), §7.5's first bullet is marked
+  superseded, and §7.6 records the closure and the rewritten may-say list.
+- `docs/comparison.md` §3.1 — the `11` is labelled "as found, pre-v1.18".
+- `docs/fidelity.md` — the F32 block's claim that this "cannot be corrected without
+  an ISA change" is corrected; the `zig build bench` output block is left alone
+  because it is still that command's literal output (re-ran it to confirm rather
+  than assume).
+- `docs/STATUS.md` — F32 closed, F35 (labels) recorded.
+- `README.md` was checked: it does not quote the crossarch table, so it needed no
+  change. It does say "11,592 checked" for the fuzzer, which is a different number
+  (round-trip fuzz cases) and is **stale** — the current run is 11,839. Low stakes,
+  but it is a stale number in a public file; fix it if you touch that section.
 
 ---
 
