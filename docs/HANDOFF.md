@@ -8,12 +8,12 @@ running something; claims that were not observed are marked as such.
 ## 1. Repository state
 
 ```
-HEAD         875d65f  docs: the published tables still said 11 — corrected to 68
-remote       origin/main, IN SYNC as of 875d65f (pushed)
+HEAD         e3f3c15  docs(status): F36 implemented and verified; F37 recorded
+remote       origin/main, IN SYNC as of e3f3c15 (pushed)
 working tree CLEAN
 ```
 
-Four commits landed this session, in this order:
+Eleven commits landed this session, in this order:
 
 | Commit | What |
 |---|---|
@@ -21,15 +21,22 @@ Four commits landed this session, in this order:
 | `025af04` | `fix(crossarch)`: CLS64's "scalar" row is a real loop now (closes **F32**) |
 | `66aee85` | `docs(status)`: F32 closed, F35 recorded, one draft of ours retracted |
 | `875d65f` | `docs`: the published tables still said 11 — corrected to 68 |
+| `0013c8f` | `docs`: two stale counts in README, and the handoff |
+| `edc24b4` | `docs`: the accelerator row said "not assemblable" — it assembles |
+| `0216f91` | `docs`: the accelerator round-trip is stronger than §6.2 claimed |
+| `84d7046` | `docs(status)`: F36 — the §3.6 table names operands the word cannot carry |
+| `4f18f7d` | `docs(status)`: F36 grows — count's source and unit are undefined |
+| `9a9b193` | `feat(vm)`: the §3.6 accelerators now dispatch, and refuse per op |
+| `e3f3c15` | `docs(status)`: F36 implemented and verified; F37 recorded |
 
 **The previous handoff's blocking item is done.** The dirty tree it described is
 committed, the 3 failing label tests pass, and the labels work is byte-verified.
 
-### Gates, all run on a cold cache at `875d65f`
+### Gates, all run on a cold cache at `e3f3c15`
 
 ```sh
 rm -rf .zig-cache && ~/.local/zig/zig build test --summary all
-  -> Build Summary: 49/49 steps succeeded; 570/570 tests passed   exit 0
+  -> Build Summary: 49/49 steps succeeded; 619/619 tests passed   exit 0
 
 ~/.local/zig/zig build crossarch   -> 8 rows, no !! warnings
 ~/.local/zig/zig build audit       -> 9/9 enforcement points, all 9 rejected when set
@@ -37,6 +44,16 @@ rm -rf .zig-cache && ~/.local/zig/zig build test --summary all
 ~/.local/zig/zig build bench       -> output unchanged (still the chunk=1 program)
 fuzzer (inside build test)         -> checked=11839 identical=11839, 0 mismatches
 ```
+
+The test count moved 570 -> 619 this session: 40 from the accelerator work and
+related changes, 9 new accelerator tests.
+
+### The goal is re-created and ARMED
+
+`goal-ac15e6ba-696a-442f-822a-9c4270e7f8bf`, max 40 rounds. The objective treats the
+§3.6 accelerators as part of the **core** encoding contract rather than as optional
+extensions, which resolves the tension the previous handoff flagged. `get_goal`
+returns null after a session boundary, so it must be re-armed again next time.
 
 ---
 
@@ -97,56 +114,56 @@ scalar-loop result — it is a fused sequence at `chunk = 1`.
 
 ## 3. What remains
 
-Unchanged in priority from the old handoff, minus items 1 and 2:
+1. **The accelerators — now blocked on a CONTRACT decision, not on code.** The VM
+   half is done (`9a9b193`): all thirteen §3.6 opcodes dispatch to
+   `refuseAccelerator`, reserved bytes read differently, and none executes. The
+   refusal is deliberate and is recorded as **F36**.
 
-1. **Wire the accelerators** — the largest remaining core gap, and the last thing
-   before the example suite. `matrix.zig`, `fft.zig` and `codec.zig` are imported
-   by **no other file**; `0x60`–`0x8F` assembles and disassembles correctly, but at
-   execution `vm.zig`'s `execute` sends the `.accelerator` payload to its `else`
-   arm, which faults with "not wired into this build yet".
+   **An earlier draft of this handoff said the work was "read a register as an
+   address, derive the count, call the model, write back". That was wrong, and the
+   error is worth keeping visible**, because it is the natural assumption and the
+   teammate who hit it was right to stop rather than implement it. What the contract
+   actually lacks:
 
-   **The decode path is already correct — do not go looking for a decoder bug.**
-   `decoder.decode` returns `.ok{.accelerator}` for these words with the §3.6
-   fields populated. The `run-bin` message says *"could not be decoded"*, which
-   reads like a decoder rejection and is not one; it is the generic phrasing on
-   `execute`'s `else` arm. Two minutes were spent chasing that red herring this
-   session — the fault is a missing dispatch arm and nothing else.
+   | Missing rule | Affects |
+   |---|---|
+   | Where a matrix **dimension** comes from — no field carries one, and "dimension" appears in neither `docs/isa-encoding.md` nor the architecture spec | `0x60` `det`, `0x61` `invert`, `0x62` `mul` |
+   | Where `transform`'s 4×4 matrix `m` comes from (`count` IS defined; `m` is not) | `0x63` |
+   | Whether `rd` is an ADDRESS or a VALUE, so `out` cannot be located | `0x64` `identity` |
+   | Where an **output buffer** comes from — `rd`, `rs1` and `count` are all spoken for | `0x80` `compress`, `0x81` `decompress` |
+   | What `count = 0` means: §3.6:490 says "derive the count from the destination register" and never says what `rd` holds | all thirteen |
+   | Which **unit** `count` uses: fft says "element count", codec is byte-oriented, and a complex element is 16 bytes — a 16× difference | `0x70`–`0x73`, `0x80`–`0x83` |
 
-   **Scope is already fixed by the spec — do not redesign it.** `docs/isa-encoding.md`
-   §3.6 (around line 461) assigns all 13 opcodes with their operands and their exact
-   model signature, derived from the existing modules rather than invented:
+   So the next step is **not** a VM change. It is a §3.6 amendment stating, per
+   operation, where each dimension and output buffer comes from and what
+   `count = 0` means — the same kind of amendment Amendment 1.1 already made for the
+   operand layout. Until then, refusing is correct: a guessed dimension produces a
+   wrong determinant that the simulator would report confidently.
 
-   | Range | Ops | Model entry points that already exist |
-   |---|---|---|
-   | `0x60`–`0x64` | `matrix.det/invert/mul/transform/identity` | `src/matrix.zig` |
-   | `0x70`–`0x73` | `fft.forward/inverse`, `fft.ntt`, `fft.ntt.inverse` | `src/fft.zig` |
-   | `0x80`–`0x83` | `codec.compress/decompress/fnv1a/checksum16` | `src/codec.zig` |
-
-   Every one of those model functions already exists and is already tested in its own
-   module. The work is: read a register as an address, derive the element count
-   (`count == 0` means "derive from the destination register" — see §3.6), call the
-   model, write back. Opcodes in `0x60`–`0x8F` **not** in the table are reserved and
-   must keep hitting the fault path rather than becoming a silent no-op.
-
-   Two constraints that will bite: the models take `[]f64`/`[]u8`/`[]Complex` views
-   into the VM's flat `mem.bytes`, and the VM must not allocate inside the execution
-   loop (AGENTS.md §4.1) — so the views come from the memory slice, never from a new
-   allocation. And every failure must render as a plain-language diagnostic naming the
-   operand (AGENTS.md §4.2), not a hex code.
+   Two things that will bite when the amendment lands: the models take
+   `[]f64`/`[]u8`/`[]Complex` views into a flat `[]u8` whose base alignment is **not**
+   guaranteed (`Vm.init` accepts any `[]u8`; tests use an align-1 allocator), so an
+   alignment check must precede any `@alignCast` — a misaligned cast panics. And the
+   VM must not allocate inside the execution loop (AGENTS.md §4.1).
 
    The RTL half is **already done and is not part of this work.** `rtl/accel.sv`
-   decodes `0x60`–`0x8F` to the §3.6 layout, flags a non-zero reserved field, and
-   raises `err_accel_not_impl_o` for a recognised op / `err_accel_unknown_o` for a
-   reserved byte, with `result_valid_o` tied low. That is the *correct* contract:
-   `docs/isa-encoding.md` §3.6 states the behaviour of these operations "is a
-   **software model**", and `rtl/CROSSCHECK.md` §4/§5.7 records the RTL as
-   deliberately decode-only rather than fabricating a result. So do **not** build
-   matrix/FFT/codec datapaths in SystemVerilog to "complete" this — the existing
-   arrangement is what the contract asks for, and the honest refusal is the point.
-   The VM is the side that is actually missing the dispatch.
-2. **The example suite, analyzers, instruction counter** — the bulk of the goal,
+   decodes the range, flags a non-zero reserved field, and raises
+   `err_accel_not_impl_o` / `err_accel_unknown_o` with `result_valid_o` tied low.
+   That is the *correct* contract: §3.6 states these operations' behaviour "is a
+   software model", and `rtl/CROSSCHECK.md` §4/§5.7 records the RTL as deliberately
+   decode-only rather than fabricating a result. Do **not** build
+   matrix/FFT/codec datapaths in SystemVerilog to "complete" this.
+
+2. **F37 — a decision, not a patch.** `decoder.zig:469-485` accepts every byte in
+   `0x60`–`0x8F` as `.accelerator` with no registry lookup, so reserved-ness is not
+   established by the decoder even though §3.6 says such opcodes "decode as an
+   accelerator instruction with an unrecognised operation". Either teach the decoder
+   the lookup, or reword §3.6 to say the *simulator* refuses them. Both defensible;
+   picking one silently is not. Not a live defect today, because the VM does the
+   lookup correctly.
+3. **The example suite, analyzers, instruction counter** — the bulk of the goal,
    genuinely unblocked only after 1.
-3. **`cap.*`** stays decode-only. §3.5 v1.12 explains why: the register pair has
+4. **`cap.*`** stays decode-only. §3.5 v1.12 explains why: the register pair has
    no `length` bit position, so a capability cannot be reconstructed. Needs a §6
    redesign, not a bug fix. Do not "fix" it by inventing a field layout.
 
@@ -170,8 +187,16 @@ Unchanged in priority from the old handoff, minus items 1 and 2:
   `-MAKEFLAGS "VK_PCH_I_FAST= VK_PCH_I_SLOW="`. Never redirect a Verilator log.
 - Two encoders exist (`assembler.zig` `Instruction.word()` and `decoder.zig`
   `encode()`); the fuzzer checks they agree. Keep it that way.
+- **A stale CLI binary reads exactly like a real result.** `zig-out/bin/celeris64`
+  is only rebuilt by `zig build`. Verifying a `src/` change by running the CLI
+  without rebuilding reports the PREVIOUS code, and nothing in `git status` or a
+  clean `git diff` reveals it. This produced a false reading this session that
+  nearly went into `docs/STATUS.md` as evidence. Rebuild before believing a CLI
+  observation you intend to rely on.
+- `zig fmt` was **not** clean on the baseline `src/vm.zig`; a change that rewraps
+  those lines is not gratuitous churn.
 
-### Two traps, both confirmed this session
+### Three traps, all confirmed this session
 
 - **`assembleSource` moves its arena into the returned `Program`.** `Program.arena`
   is a *value copy* sharing one node list, so `prog.deinit()` **and**
@@ -182,6 +207,13 @@ Unchanged in priority from the old handoff, minus items 1 and 2:
   `ArrayList` buffer, and Zig 0.17's `ArenaAllocator` can *move* that allocation
   when it grows the same node; a stale slice then reads `0xAAAA…` poison. "The
   words are arena-owned" does not make a slice safe. Test helpers return `Program`.
+- **A `Diagnostic` outlives the function that builds it.** Storing a rendered
+  string in a function-local buffer and returning it in `.detail` or `.mnemonic`
+  gives an empty or corrupt field at render time, silently. This was attempted and
+  caught by an existing test; the value must point at storage that outlives the
+  call. Related: `main.zig:379` renders into a fixed `[1024]u8` and discards
+  overflow with `catch {}`, so an over-long diagnostic is truncated mid-word with
+  no indication. Keep a rendered fault under ~900 bytes.
 
 ---
 
