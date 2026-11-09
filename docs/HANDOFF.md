@@ -276,6 +276,33 @@ test really exercises the shipped programs rather than only fixtures.
    misprediction. Declared `expected_loss` before measuring; the measurement agreed.
    **The suite has 13 kernels, 1 win and 12 losses.**
 
+   **THREE CLS64 primitives remain unexercised, and the honest reason is that they cannot be
+   made four-way. Every cell below was produced by feeding the instruction to the decoder this
+   repository executes — not by reading its dispatch (2026-11-09):**
+
+   | Primitive | CLS64 | RISC-V | AArch64 | x86-64 |
+   |---|---|---|---|---|
+   | `field.extract`/`field.insert` | yes | emulate (needs `srl`+`and`+`sll`+`or`) | emulate — but **standalone `lsr #k` is UBFM, REJECTED**; only the shifted-register form works | **impossible: no shift at all** (0xD1/0xD3 REJECTED) |
+   | `div` / `divu` | yes | yes | **`sdiv` REJECTED** | **`divq` REJECTED** |
+   | `or` | yes | yes | yes (`orr`) | **`orq` REJECTED** (0x09), so CLS64's own `or` cannot be compared |
+
+   A `field.*` kernel was prototyped and **all three writable programs were run and confirmed
+   to compute the same answer** (`9898397169`): CLS64 2057 retired, AArch64 2697, RISC-V 3084.
+   The **x86 program cannot be written at all**, because unpacking a high bit offset needs a
+   shift and this x86 subset has none. The kernel is therefore **not** added: the suite's
+   contract is that all four compute the same thing, and weakening the kernel until it fits
+   would have compared a hardware primitive against an emulation that does not exist.
+
+   **The RISC-V program is worth remembering as a near-miss.** Its first version returned
+   `1073741823`, not `9898397169`, for two reasons that only running could reveal: `a1` was
+   used as BOTH the packed value and the running sum (so nothing accumulated), and the mask
+   for the 9-bit field was built in `a7`, which this decoder's halt sequence reads — clobbering
+   the halt register. A first draft of this very paragraph claimed RISC-V was "expected to
+   work" **without running it**; that claim was removed and the program built instead, which is
+   what found both bugs. **A limit of the x86-64
+   SUBSET, not of x86-64 and not of CLS64** — recorded in `docs/STATUS.md` under the corrected
+   capability table.
+
    The rule for each new kernel is in §4 and F41, and it has earned its keep three times:
    **verify every instruction against `src/isa_*.zig` before measuring**, hand-write the
    programs rather than generating them, and declare honest expectations. **F45 is the
