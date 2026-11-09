@@ -271,6 +271,44 @@ fn isTokenChar(c: u8) bool {
 
 // -- constructors for the failures the tooling actually hits ------------------
 
+/// v1.17 labels: the same name defined twice.
+pub fn duplicateLabel(line: usize, label: []const u8, file: []const u8) Diagnostic {
+    return .{
+        .line = line,
+        .file = file,
+        .stage = "collecting labels",
+        .offending = label,
+        .expected = "a label name that is not already defined in this program, because a second definition would make every reference to it ambiguous",
+        .detail = "The label was rejected rather than the later definition silently winning; assembly stopped here.",
+    };
+}
+
+/// v1.17 labels: a referenced name that is never defined.
+pub fn unknownLabel(line: usize, label: []const u8, file: []const u8) Diagnostic {
+    return .{
+        .line = line,
+        .file = file,
+        .stage = "resolving labels",
+        .offending = label,
+        .expected = "the name of a label defined somewhere in this program, written as \"name:\" on a line of its own or before an instruction",
+        .detail = "The reference was not resolved to address 0 or to anything else; assembly stopped here.",
+    };
+}
+
+/// v1.17 labels: a branch whose target is further away than the 28-bit signed
+/// offset can reach.
+pub fn labelOutOfRange(line: usize, label: []const u8, delta: i64, file: []const u8) Diagnostic {
+    _ = delta;
+    return .{
+        .line = line,
+        .file = file,
+        .stage = "resolving labels",
+        .offending = label,
+        .expected = "a target within 134217727 bytes either side of the branch, because a branch offset is a signed 28-bit field",
+        .detail = "The branch was not encoded; a truncated offset would send control somewhere unintended, so assembly stopped here.",
+    };
+}
+
 pub fn badMnemonic(line: usize, text: []const u8) Diagnostic {
     return .{
         .line = line,

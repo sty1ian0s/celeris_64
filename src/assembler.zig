@@ -290,6 +290,11 @@ pub const Kind = enum {
 /// test can work on structure rather than on re-emitted source text.
 pub const Instruction = struct {
     opcode: Opcode,
+    /// Set when the source named a LABEL where an immediate was expected. The
+    /// text is patched into the word by `assembleSource`'s final pass, once every
+    /// label's address is known. Kept as text rather than a resolved value
+    /// because a forward reference has no value at parse time.
+    label_ref: ?[]const u8 = null,
     rd: u4 = 0,
     rs1: u4 = 0,
     /// ALU second source register, ignored when `imm` is non-zero (§3.1).
@@ -429,6 +434,10 @@ const spill_window = 16;
 
 /// I/O scratch used by the CLI. Nothing here allocates per instruction; the
 /// word buffer grows once and the arena owns every slice.
+/// §1: the fixed instruction width. Named here rather than imported from vm.zig
+/// so the assembler does not depend on the VM.
+pub const insn_bytes: u64 = 8;
+
 pub const Assembler = struct {
     arena: std.heap.ArenaAllocator,
     words: std.ArrayList(u64) = .empty,
@@ -445,14 +454,31 @@ pub const Assembler = struct {
     /// Number of instructions in the rolling window.
     window_len: usize = 0,
     warned_spill: bool = false,
+    /// Label -> instruction index (NOT byte address). Byte addresses are derived
+    /// by multiplying by the fixed 8-byte instruction size, so storing indices
+    /// keeps the table independent of §1's width.
+    symbols: std.StringHashMapUnmanaged(usize) = .{},
+    /// Label references whose target is not known yet, patched in a final pass.
+    pending: std.ArrayListUnmanaged(PendingRef) = .empty,
     /// The most recently assembled instruction. Kept so callers (the
     /// disassembler's round-trip test and the CLI) can inspect the decoded
     /// form without re-deriving it from the word.
     last: Instruction = .{ .opcode = .nop },
 
+    pub const PendingRef = struct {
+        /// The assembled word, patched once the label resolves.
+        word_index: usize = 0,
+        label: []const u8 = "",
+        line_no: usize = 0,
+        /// Which immediate the label fills: an absolute `imm48` for jump/call, or
+        /// a PC-relative 28-bit offset for `branch`.
+        kind: enum { absolute48, relative28 } = .absolute48,
+    };
+
     pub fn init(child: std.mem.Allocator) Assembler {
         return .{ .arena = std.heap.ArenaAllocator.init(child) };
     }
+
 
     pub fn deinit(self: *Assembler) void {
         self.arena.deinit();
@@ -470,6 +496,42 @@ pub const Assembler = struct {
         source: []const u8,
         out_diag: *Diagnostic,
     ) Error!Program {
+        self.symbols.clearRetainingCapacity();
+        self.pending.clearRetainingCapacity();
+        self.words.clearRetainingCapacity();
+
+        // PASS 1: collect label definitions and their instruction indices.
+        //
+        // Labels are resolved in a separate pass because a forward reference is
+        // the common case — a loop branches to a label defined BELOW it — and a
+        // single pass could not know that address yet. The pass only counts
+        // instructions; it does not assemble, so a label's address cannot depend
+        // on how long an instruction turns out to be (every instruction is
+        // exactly 8 bytes, §1, so an index times 8 is the address).
+        {
+            var scan = std.mem.splitScalar(u8, source, '\n');
+            var scan_no: usize = 0;
+            var index: usize = 0;
+            while (scan.next()) |raw| {
+                scan_no += 1;
+                const line = std.mem.trim(u8, stripComment(stripAddressPrefix(raw)), " \t\r");
+                if (line.len == 0) continue;
+
+                const split = splitLabel(line);
+                if (split.label) |label| {
+                    if (self.symbols.contains(label)) {
+                        out_diag.* = diag.duplicateLabel(scan_no, label, name);
+                        return error.AssemblyFailed;
+                    }
+                    self.symbols.put(self.allocator(), label, index) catch return error.OutOfMemory;
+                }
+                // A line that is ONLY a label defines a position and emits nothing.
+                if (split.rest.len == 0) continue;
+                index += 1;
+            }
+        }
+
+        // PASS 2: assemble, resolving labels as they are met.
         var lines = std.mem.splitScalar(u8, source, '\n');
         var line_no: usize = 0;
         while (lines.next()) |raw_line| {
@@ -478,14 +540,64 @@ pub const Assembler = struct {
             const trimmed = std.mem.trim(u8, line, " \t\r");
             if (trimmed.len == 0) continue; // blank lines are tolerated
 
-            const insn = self.assembleLine(name, line_no, trimmed, out_diag) catch |e| switch (e) {
+            const split = splitLabel(trimmed);
+            // A line that is only a label emits nothing, exactly as pass 1 assumed.
+            if (split.rest.len == 0) continue;
+            const body = split.rest;
+
+            const insn = self.assembleLine(name, line_no, body, out_diag) catch |e| switch (e) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.AssemblyFailed => return error.AssemblyFailed,
             };
             self.last = insn;
             self.noteDestination(insn);
             self.advanceSpillWindow();
+            const word_index = self.words.items.len;
             self.words.append(self.allocator(), insn.word()) catch return error.OutOfMemory;
+
+            // Record any label the line referenced, so pass 3 can patch it. The
+            // parser stores the label text in `label_ref` rather than an immediate
+            // when it sees one.
+            if (insn.label_ref) |ref| {
+                self.pending.append(self.allocator(), .{
+                    .word_index = word_index,
+                    .label = ref,
+                    .line_no = line_no,
+                    .kind = if (insn.opcode == .jump or insn.opcode == .call) .absolute48 else .relative28,
+                }) catch return error.OutOfMemory;
+            }
+        }
+
+        // PASS 3: patch every reference now that all addresses are known.
+        for (self.pending.items) |ref| {
+            const target_index = self.symbols.get(ref.label) orelse {
+                out_diag.* = diag.unknownLabel(ref.line_no, ref.label, name);
+                return error.AssemblyFailed;
+            };
+            // §1: every instruction is exactly 8 bytes, so a label's address is
+            // its instruction index times 8.
+            const target_addr = @as(u64, target_index) * insn_bytes;
+            const here = @as(u64, ref.word_index) * insn_bytes;
+            var word = self.words.items[ref.word_index];
+            switch (ref.kind) {
+                .absolute48 => {
+                    word &= ~@as(u64, 0xFFFF_FFFF_FFFF);
+                    word |= target_addr & 0xFFFF_FFFF_FFFF;
+                },
+                .relative28 => {
+                    // §3.0.1: relative to the BRANCH INSTRUCTION ITSELF, not to
+                    // the following one. A signed 28-bit field, so the reach is
+                    // +/- 128 MiB.
+                    const delta = @as(i64, @intCast(target_addr)) - @as(i64, @intCast(here));
+                    if (delta < -0x800_0000 or delta > 0x7FF_FFFF) {
+                        out_diag.* = diag.labelOutOfRange(ref.line_no, ref.label, delta, name);
+                        return error.AssemblyFailed;
+                    }
+                    word &= ~@as(u64, 0x0FFF_FFFF);
+                    word |= @as(u64, @bitCast(delta)) & 0x0FFF_FFFF;
+                },
+            }
+            self.words.items[ref.word_index] = word;
         }
 
         return .{
@@ -658,8 +770,14 @@ const LineParser = struct {
                 }
             },
             .jump, .call => {
-                const tok = self.nextField() orelse return self.failMissing(out, "target address", "an address to jump to");
-                insn.imm = self.parseImm(tok, out, "target address") catch |e| return e;
+                const tok = self.nextField() orelse return self.failMissing(out, "target address", "an address to jump to, or a label name");
+                // A label is patched in the final pass, once every address is
+                // known; a literal is used directly.
+                if (looksLikeLabel(tok)) {
+                    insn.label_ref = tok;
+                } else {
+                    insn.imm = self.parseImm(tok, out, "target address") catch |e| return e;
+                }
             },
             else => {},
         }
@@ -687,7 +805,12 @@ const LineParser = struct {
             return self.fail(out, "match value", match_tok, "one of [EQUAL], [LESS], [GREATER], [UNSIGNED_LESS] or [UNSIGNED_GREATER] (docs/isa-encoding.md §3.2.1)");
 
         const off_tok = self.nextField() orelse
-            return self.failMissing(out, "branch offset", "a byte offset relative to this branch");
+            return self.failMissing(out, "branch target", "a label name, or a byte offset relative to this branch");
+        if (looksLikeLabel(off_tok)) {
+            // Resolved in the final pass; `imm` stays 0 and is patched.
+            insn.label_ref = off_tok;
+            return insn;
+        }
         const off = self.parseImm(off_tok, out, "branch offset") catch |e| return e;
         if (off < -0x800_0000 or off > 0x7FF_FFFF) {
             return self.fail(out, "branch offset", off_tok, "an offset that fits in the signed 28-bit field, from -134217728 to 134217727");
@@ -1500,6 +1623,39 @@ pub fn parseBracketedChunk(tok: []const u8) ?struct { reg: []const u8, chunk: []
 /// `[R4+16]` -> { reg = "R4", disp = "+16" }. Accepts `[R4]` with no
 /// displacement, and both signs. The displacement is returned as TEXT so the
 /// caller reports an unparseable number with the user's own token.
+/// Splits `"loop: add R1, R2"` into label `"loop"` and rest `"add R1, R2"`.
+/// Also handles a line that is only a label (`"loop:"`), whose rest is empty.
+///
+/// Written to be usable by BOTH assembly passes, so the address pass and the
+/// emit pass cannot disagree about which lines produce an instruction — the
+/// classic way a two-pass assembler drifts out of sync and produces a branch to
+/// the wrong place.
+/// True when an operand names a label rather than a number. A label starts with
+/// a letter, `_` or `.`; a number starts with a digit, `-`, `+` or `0x`.
+pub fn looksLikeLabel(tok: []const u8) bool {
+    if (tok.len == 0) return false;
+    const first = tok[0];
+    return std.ascii.isAlphabetic(first) or first == '_' or first == '.';
+}
+
+pub fn splitLabel(line: []const u8) struct { label: ?[]const u8, rest: []const u8 } {
+    const colon = std.mem.indexOfScalar(u8, line, ':') orelse
+        return .{ .label = null, .rest = line };
+    const name = std.mem.trim(u8, line[0..colon], " \t");
+    // A colon inside an operand (`[R1+0]`) is not a label. Label names are
+    // identifiers, so anything containing a space or a bracket is not one.
+    if (name.len == 0) return .{ .label = null, .rest = line };
+    for (name) |ch| {
+        if (!std.ascii.isAlphanumeric(ch) and ch != '_' and ch != '.') {
+            return .{ .label = null, .rest = line };
+        }
+    }
+    if (!std.ascii.isAlphabetic(name[0]) and name[0] != '_' and name[0] != '.') {
+        return .{ .label = null, .rest = line };
+    }
+    return .{ .label = name, .rest = std.mem.trim(u8, line[colon + 1 ..], " \t") };
+}
+
 pub fn parseBracketedAddress(tok: []const u8) ?struct { reg: []const u8, disp: []const u8 } {
     const open = std.mem.indexOfScalar(u8, tok, '[') orelse return null;
     const close = std.mem.indexOfScalar(u8, tok, ']') orelse return null;
@@ -1549,6 +1705,25 @@ fn assembleOk(source: []const u8) !u64 {
     };
     try testing.expectEqual(@as(usize, 1), prog.words.len);
     return prog.words[0];
+}
+
+/// Assembles a whole program and returns its Program. Unlike `assembleOk` this
+/// makes no claim about instruction count — use it for multi-instruction tests
+/// (labels, layout), where the single-word guarantee does not apply.
+///
+/// The caller owns the result and must free it with `prog.deinit()`. The
+/// assembler is deliberately NOT deinited: `assembleSource` returns a
+/// *value copy* of its arena, and that copy shares the same node list, so
+/// freeing both would free the same nodes twice and abort.
+fn assembleProgram(source: []const u8) !Program {
+    var assembler = Assembler.init(testing.allocator);
+    var d: Diagnostic = .{};
+    return assembler.assembleSource("test.asm", source, &d) catch {
+        // Nothing was handed over on failure, so the arena is still ours.
+        assembler.deinit();
+        std.debug.print("unexpected diagnostic: {}\n", .{d});
+        return error.TestUnexpectedResult;
+    };
 }
 
 fn assembleOne(source: []const u8) !Instruction {
@@ -2273,4 +2448,98 @@ test "F12: the cap.* even-index rule for pairs, and its cap.check exemption" {
     try testing.expectEqual(@as(u64, 0x52), prog.words[0] >> 56);
     try testing.expectEqual(@as(u64, 1), (prog.words[0] >> 52) & 0xF);
     try testing.expectEqual(@as(u64, 3), (prog.words[0] >> 48) & 0xF);
+}
+
+test "labels: a forward reference resolves to the right address" {
+    // A forward reference is the common case — a loop branches to a label
+    // defined BELOW it — and it is why labels need a second pass at all.
+    var prog = try assembleProgram(
+        \\jump done
+        \\nop
+        \\nop
+        \\done:
+        \\halt
+    );
+    defer prog.deinit();
+    try testing.expectEqual(@as(usize, 4), prog.words.len);
+    // `done` is the fourth instruction, so its address is 3 * 8 = 24.
+    try testing.expectEqual(@as(u64, 24), prog.words[0] & 0xFFFF_FFFF_FFFF);
+}
+
+test "labels: a backward branch encodes a negative PC-relative offset" {
+    // The offset is relative to the BRANCH ITSELF (§3.0.1), not to the
+    // instruction before it and not to the one after it. The branch sits at
+    // address 8; `top` is at address 0; so the offset is 0 - 8 = -8.
+    var prog = try assembleProgram(
+        \\top:
+        \\nop
+        \\branch R0, [EQUAL], top
+    );
+    defer prog.deinit();
+    try testing.expectEqual(@as(usize, 2), prog.words.len);
+    const offset: i28 = @bitCast(@as(u28, @truncate(prog.words[1] & 0x0FFF_FFFF)));
+    try testing.expectEqual(@as(i28, -8), offset);
+}
+
+test "labels: a label on the same line as an instruction still works" {
+    var prog = try assembleProgram(
+        \\jump there
+        \\there: halt
+    );
+    defer prog.deinit();
+    try testing.expectEqual(@as(usize, 2), prog.words.len);
+    // `halt` is the second instruction: address 8.
+    try testing.expectEqual(@as(u64, 8), prog.words[0] & 0xFFFF_FFFF_FFFF);
+}
+
+test "labels: a duplicate definition is rejected, not silently resolved" {
+    var assembler = Assembler.init(testing.allocator);
+    defer assembler.deinit();
+    var d: Diagnostic = .{};
+    const result = assembler.assembleSource("dup.asm",
+        \\x: nop
+        \\x: halt
+    , &d);
+    try testing.expectError(error.AssemblyFailed, result);
+    try testing.expectEqual(@as(usize, 2), d.line);
+}
+
+test "labels: an undefined reference is rejected, never patched to 0" {
+    var assembler = Assembler.init(testing.allocator);
+    defer assembler.deinit();
+    var d: Diagnostic = .{};
+    const result = assembler.assembleSource("undef.asm",
+        \\jump nowhere
+        \\halt
+    , &d);
+    try testing.expectError(error.AssemblyFailed, result);
+    try testing.expectEqual(@as(usize, 1), d.line);
+}
+
+test "labels: a line that is only a label emits no instruction" {
+    var assembler = Assembler.init(testing.allocator);
+    // NOTE: no `defer assembler.deinit()` here. `assembleSource` MOVES the arena
+    // into the returned Program on success, so freeing both is a double free.
+    // The failure path is the only one that must free the assembler.
+    var d: Diagnostic = .{};
+    var prog = try assembler.assembleSource("label.asm",
+        \\a:
+        \\b:
+        \\c:
+        \\halt
+    , &d);
+    defer prog.deinit();
+    try testing.expectEqual(@as(usize, 1), prog.words.len);
+}
+
+test "labels: a colon inside an operand is not mistaken for a label" {
+    // `[R1+0]` contains no colon, but a future addressing mode might; the splitter
+    // must only treat a leading identifier followed by ':' as a definition.
+    const split = splitLabel("load R6, [R1+0]");
+    try testing.expectEqual(@as(?[]const u8, null), split.label);
+    try testing.expectEqualStrings("load R6, [R1+0]", split.rest);
+
+    const yes = splitLabel("loop: add R1, R1, 1");
+    try testing.expectEqualStrings("loop", yes.label.?);
+    try testing.expectEqualStrings("add R1, R1, 1", yes.rest);
 }
