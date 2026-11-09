@@ -567,6 +567,88 @@ pub const examples = [_]Example{
     },
 
     // ====================================================================
+    // soa_combine
+    // ====================================================================
+    // WHY IT IS HERE: this is the STRUCT-OF-ARRAYS kernel, and its whole point is the
+    //     MEMORY LAYOUT rather than the arithmetic. The 256 words are reinterpreted as two
+    //     parallel field planes of 128 elements each - field A from 8192, field B from
+    //     9216, being 8192 + 128*8 - and each iteration advances BOTH cursors by one
+    //     element to combine A[i] with B[i].
+    //
+    //     That is what distinguishes SoA from the array-of-structs traversal the other
+    //     kernels do implicitly: there is no single stride that reaches a complete record.
+    //     A program that walked one plane and treated the second as a continuation would
+    //     compute the same *kind* of thing while touching the wrong bytes, and the field
+    //     WEIGHT is what makes that visible - the answer is `sum(A[i]*3 + B[i])`, which is
+    //     12077864668408718583 against a plain sum of 10375510360466236767. Dropping the
+    //     weight, or pairing A[i] with the wrong B element, changes the answer.
+    //
+    //     WHY CLS64 IS EXPECTED TO LOSE: the combine is `load, load, mul, add, add` plus
+    //     two cursor bumps on every ISA, so the body is the same work everywhere and the
+    //     difference is again loop overhead - CLS64 pays an unconditional `jump` per
+    //     iteration where the other three fall through.
+    .{
+        .name = "soa_combine",
+        .what = "traverse two parallel field planes: sum over i of (A[i]*3 + B[i])",
+        .expectation = .expected_loss,
+        .data = word_data,
+        .cls64 =
+        \\# Struct-of-arrays traversal over two parallel field planes of 128 u64 each.
+        \\#
+        \\# Field A starts at the data base (8192) and field B one plane later, at 9216.
+        \\# Each iteration advances BOTH cursors, because a record is split across the two
+        \\# planes - there is no single stride that reaches one.
+        \\#
+        \\# The weight on field A is what makes a wrong pairing visible: the answer is
+        \\# sum(A[i]*3 + B[i]), not sum(A[i] + B[i]).
+        \\mov R1, 8192        # cursor into field A
+        \\mov R10, 9216       # cursor into field B, the parallel plane
+        \\mov R2, 0           # accumulator
+        \\mov R3, 0           # elements consumed
+        \\mov R4, 128         # element count
+        \\mov R5, 8448        # result slot
+        \\mov R6, 3           # field-A weight
+        \\loop:
+        \\compare R9, R3, R4
+        \\branch R9, [EQUAL], done
+        \\load R7, [R1+0]     # A[i]
+        \\load R8, [R10+0]    # B[i]
+        \\mul R7, R7, R6      # A[i] * 3
+        \\add R2, R2, R7
+        \\add R2, R2, R8
+        \\add R1, R1, 8
+        \\add R10, R10, 8
+        \\add R3, R3, 1
+        \\jump loop
+        \\done:
+        \\store R2, [R5+0]
+        \\halt
+        ,
+        .riscv = &.{
+            0x00002537, 0x00900793, 0x00A79793, 0x00000593, 0x00000613, 0x08000693,
+            0x00002737, 0x1007071B, 0x00300813, 0x02D65463, 0x00053883, 0x0007B283,
+            0x030888B3, 0x011585B3, 0x005585B3, 0x00850513, 0x00878793, 0x00160613,
+            0xFDDFF06F, 0x00B73023, 0x05D00893, 0x00000073,
+        },
+        .aarch64 = &.{
+            0xD2840000, 0xD2848005, 0xD2800001, 0xD2800002, 0xD2801003, 0xD2842004,
+            0xD2800066, 0xEB03005F, 0x54000140, 0xF9400007, 0xF94000A8, 0x9B067CE7,
+            0x8B070021, 0x8B080021, 0x91002000, 0x910020A5, 0x91000442, 0x17FFFFF6,
+            0xF9000081, 0x14000000,
+        },
+        .x86 = &.{
+            0x48, 0xC7, 0xC0, 0x00, 0x20, 0x00, 0x00, 0x48, 0xC7, 0xC3, 0x00, 0x24,
+            0x00, 0x00, 0x48, 0x31, 0xC9, 0x48, 0x31, 0xF6, 0x48, 0xC7, 0xC2, 0x80,
+            0x00, 0x00, 0x00, 0x48, 0xC7, 0xC7, 0x00, 0x21, 0x00, 0x00, 0x49, 0xC7,
+            0xC1, 0x03, 0x00, 0x00, 0x00, 0x48, 0x39, 0xD6, 0x74, 0x1D, 0x4C, 0x8B,
+            0x00, 0x4C, 0x8B, 0x13, 0x4D, 0x0F, 0xAF, 0xC1, 0x4C, 0x01, 0xC1, 0x4C,
+            0x01, 0xD1, 0x48, 0x83, 0xC0, 0x08, 0x48, 0x83, 0xC3, 0x08, 0x48, 0xFF,
+            0xC6, 0xEB, 0xDE, 0x48, 0x89, 0x0F, 0xEB, 0xFE,
+        },
+        .answer = 12077864668408718583,
+    },
+
+    // ====================================================================
     // loop_sum
     // ====================================================================
     // WHY IT IS HERE, AND WHY CLS64 IS EXPECTED TO LOSE MOST BADLY HERE: with a body of
@@ -1108,6 +1190,18 @@ pub fn answerFor(name: []const u8) u64 {
             c +%= a *% b;
         }
         return c;
+    }
+    if (std.mem.eql(u8, name, "soa_combine")) {
+        // Two parallel field planes over the same 256 words: field A from 8192 and
+        // field B from 8192 + 128*8 = 9216. A record is split across the planes, so
+        // this walks both cursors together rather than one strided pass.
+        var acc: u64 = 0;
+        for (0..128) |i| {
+            const a = std.mem.readInt(u64, word_data[i * 8 ..][0..8], .little);
+            const b = std.mem.readInt(u64, word_data[0x400 + i * 8 ..][0..8], .little);
+            acc +%= a *% 3 +% b;
+        }
+        return acc;
     }
     unreachable;
 }
