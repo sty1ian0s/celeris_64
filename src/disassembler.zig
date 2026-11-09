@@ -63,6 +63,10 @@ pub fn render(ins: Instruction, w: *std.Io.Writer) std.Io.Writer.Error!void {
         .nop => try w.writeAll("nop"),
         .halt => try w.writeAll("halt"),
         .ret => try w.writeAll("ret"),
+        .branch => |b| try branch(b, w),
+
+        .load => |m| try mem(m, w, true),
+        .store => |m| try mem(m, w, false),
         .jump => |i| try w.print("jump {d}", .{i.target}),
         .call => |i| try w.print("call {d}", .{i.target}),
 
@@ -172,6 +176,63 @@ fn rawFallback(i: anytype, w: *std.Io.Writer) std.Io.Writer.Error!void {
     const T = @TypeOf(i);
     const op: u8 = if (@hasField(T, "opcode")) i.opcode else i.op;
     try w.print(".raw {d}, {d}, {d}, {d}", .{ op, i.operand, i.rd, i.rs1 });
+}
+
+/// §3.0.1: `branch rs1, [MATCH], offset`. The offset is printed as the signed
+/// byte displacement the word carries, not as a resolved absolute address,
+/// because the word does not store an absolute address and printing one would
+/// make the text re-assemble to a different word whenever the program moved.
+fn branch(b: anytype, w: *std.Io.Writer) std.Io.Writer.Error!void {
+    const name = statusName(b.match_val) orelse {
+        // A match value outside the enum is not expressible text, so the word goes
+        // out verbatim rather than being rendered as a branch that cannot fire.
+        try w.print(".raw {d}, {d}, 0, {d}", .{ b.op, b.operand, b.rs1 });
+        return;
+    };
+    try w.print("branch {s}, [{s}], {d}", .{ regName(b.rs1), name, b.offset });
+}
+
+/// §3.1.1: `load rd, [rs1+off]` and `store rs2, [rs1+off], src`.
+fn mem(m: anytype, w: *std.Io.Writer, is_load: bool) std.Io.Writer.Error!void {
+    if (is_load) {
+        // `load` has no source register; a word carrying one is not expressible.
+        if (m.rs2 != 0) return rawFallback(m, w);
+        try w.print("load {s}{s}, [{s}", .{ regName(m.rd), widthSuffix(m.width), regName(m.rs1) });
+        try printOffset(w, m.offset);
+        try w.writeAll("]");
+    } else {
+        // `store` writes no register, so a non-zero rd is not expressible.
+        if (m.rd != 0) return rawFallback(m, w);
+        // `store src, [base+off]` — the source appears ONCE. The width suffix
+        // belongs to the source register, which is the value being narrowed.
+        try w.print("store {s}{s}, [{s}", .{ regName(m.rs2), widthSuffix(m.width), regName(m.rs1) });
+        try printOffset(w, m.offset);
+        try w.writeAll("]");
+    }
+}
+
+/// Prints a displacement with an explicit leading sign, so `[R4+16]` cannot be
+/// misread as a register named `R416`. Written as a helper rather than a custom
+/// `format` hook because the two sign cases need different format strings.
+fn printOffset(w: *std.Io.Writer, off: i64) std.Io.Writer.Error!void {
+    if (off < 0) {
+        try w.print("{d}", .{off});
+    } else {
+        try w.print("+{d}", .{off});
+    }
+}
+
+/// The five status enum names from §3.2.1. Returns null for a value the enum does
+/// not define, which the decoder rejects but a hand-built word could still carry.
+fn statusName(v: u4) ?[]const u8 {
+    return switch (v) {
+        0 => "EQUAL",
+        1 => "LESS",
+        2 => "GREATER",
+        3 => "UNSIGNED_LESS",
+        4 => "UNSIGNED_GREATER",
+        else => null,
+    };
 }
 
 fn mov(i: anytype, w: *std.Io.Writer) std.Io.Writer.Error!void {

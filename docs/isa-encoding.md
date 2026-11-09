@@ -1,6 +1,6 @@
 # Celeris-64 (CLS64) Instruction Encoding Contract
 
-Document Version: 1.16
+Document Version: 1.17
 Status: **Normative** — all simulator, assembler and disassembler code MUST match this
 document. If code and this document disagree, one of them is a bug.
 
@@ -61,6 +61,60 @@ Opcodes are grouped by high nibble so the decoder can dispatch with one compare.
 | `0x02` | `jump`   | `imm48` target address |
 | `0x03` | `call`   | `imm48` target address; sets `LR` to address of next instruction |
 | `0x04` | `ret`    | jumps to `LR` |
+| `0x05` | `branch` | `branch rs1, [MATCH], target`; §3.0.1 |
+
+#### 3.0.1 `branch` — the only conditional control transfer (`0x05`)
+
+**Why this exists (v1.17).** Every revision through v1.16 defined `jump`, `call` and
+`ret` — all **unconditional** — and nothing else. The architecture's stated principle is
+that branches are *minimised* in favour of predication, and `compare` + `select` implement
+that for **values**. But `select` chooses a value, never a control-flow target, so the ISA
+could not express a loop. Not inefficiently: **not at all.** The consequence was visible
+in `benchmarks/bench.zig`, whose "element-by-element loop" was unrolled by the **Zig
+generator at build time** because the ISA had no way to express the loop itself, and in
+`docs/comparison.md` §7 (F32), where the two "shapes" were one instruction at two chunk
+sizes because no second shape could be written.
+
+This is the smallest addition that makes the ISA able to express ordinary programs while
+staying inside its own design: the branch tests the **same status enum `compare` already
+produces**, so no flags register is introduced and the predication story is unchanged.
+
+```
+branch rs1, [MATCH], target
+```
+
+| Field | Meaning |
+|-------|---------|
+| `rs1` | register holding a status enum produced by `compare` (§3.2.1) |
+| `operand[47:44]` | `rs2` — the match value, one of the five enum values |
+| `operand[43:40]` | reserved, must be zero |
+| `operand[39:28]` | reserved, must be zero |
+| `operand[27:0]` | signed 28-bit byte offset, **relative to the branch instruction itself** |
+
+`operand[27:0]` is an **offset, not an absolute address**, and is counted from the address
+of the `branch` instruction. `jump`/`call` use an absolute `imm48`; the difference is
+deliberate — a relative offset is what a compiler can emit for a forward reference without
+knowing the final layout, and relocating a program does not invalidate its branches.
+
+The instruction performs the transfer when `status(rs1) == MATCH`, and otherwise falls
+through. Exactly one enum value is tested per instruction; arbitrary predicates such as
+`>=` are expressed by comparing against one of the five values (for example "less than or
+equal" is `branch R2, [LESS], t` followed by `branch R2, [EQUAL], t`) rather than by adding
+a sixth value, because the enum is normative in §3.2.1.
+
+**On the width nibble.** An earlier draft of this section gave `operand[43:40]` a
+`width` meaning "checked for validity but not used to select a sub-register". That was
+wrong, and the round-trip fuzzer disproved it within one run: a branch has no operand
+being narrowed, so the field carries no information, yet *validating* it while *dropping*
+it means a word with a non-zero nibble decodes, loses four bits when re-emitted, and
+re-assembles to a different word. That is precisely the F20–F26 defect class. The field is
+therefore **reserved and rejected when set**, like every other unused field in this
+document, and the two encoders now agree on it.
+
+**Match-value validity.** `rs2` must be one of `0`–`4`. Values `5`–`15` are not defined
+status enums and are rejected when the instruction is decoded (§7). Testing against an
+undefined enum is more likely a mistake than an intent, and accepting it would make a
+branch that never fires look like a branch that always falls through.
 
 For `jump`, `call` and `ret`, the operand field carries `imm48`, so `rd[55:52]` and
 `rs1[51:48]` are **unused and must be zero**; a non-zero value is a diagnostic error (§7).
@@ -122,6 +176,53 @@ gives those same bits meaning.
 | `0x19` | `mov`    | `rd = src2`; `rs1` ignored |
 
 `src2` means `rs2` or the immediate, per the rule above.
+
+#### 3.1.1 Scalar memory access (`load` / `store`)
+
+| Opcode | Mnemonic | Semantics |
+|--------|----------|-----------|
+| `0x1A` | `load`  | `rd = memory[rs1 + imm]` |
+| `0x1B` | `store` | `memory[rs1 + imm] = src2` |
+
+**Why these exist (v1.17).** Through v1.16 the only memory-touching opcodes were the fused
+`stream.*` engine (§3.4) and the decode-only `cap.*` (§3.5). A single-element
+fetch-modify-write without the stream engine was **not expressible in this ISA at all** —
+`mov R5, [R4]` is rejected by the assembler because no memory operand form exists. That
+made the architecture's central claim, that `stream.*` removes loop overhead, impossible to
+evidence: the comparison could not exhibit a non-`stream.*` baseline because the ISA gave no
+way to write one (F32, `docs/comparison.md` §7).
+
+`load` and `store` are the scalar counterpart to the fused engine, exactly as a scalar ALU
+op is the counterpart to a vector one.
+
+**Operand layout, inheriting §3.1's ALU layout:**
+
+| Field | Meaning |
+|-------|---------|
+| `rs1` | the base address register — **not** `operand`, because it is a register per §2 |
+| `operand[47:44]` | `rs2` — `store`'s source register. **Reserved-zero for `load`** |
+| `operand[43:40]` | `width` — §5 element width, which **is** the access size here |
+| `operand[39:28]` | reserved, must be zero |
+| `operand[27:0]` | signed 28-bit byte displacement from `rs1` |
+
+For `load` the result goes to `rd` and `rs2` is unused; for `store` the value comes from
+`rs2` and `rd` is unused. Either way the unused register field **must be zero**, and a
+non-zero value is rejected when decoded — the same two-layer rule as §3.3 and §3.6, because
+the assembler is not the only entry point (`run-bin` loads blobs).
+
+**Addressing is `rs1 + imm`, with no post-increment.** Auto-increment belongs to the stream
+engine; a scalar access that silently moved its own base would make `load` unusable for
+random access, which is what it is for.
+
+**Access width** comes from the §5 suffix on the *destination* register for `load`
+(`load R5.w, [R4+0]` reads 2 bytes) and on the *source* register for `store`
+(`store R5.b, [R4+0], R6` writes 1 byte). A sub-width load **zero-extends** into `rd`,
+matching §2.1's rule for every other sub-register write. A sub-width store writes exactly
+that many bytes.
+
+**Bounds.** The whole access is checked before any byte is written, and a store that does
+not fit is refused with no byte modified — the same all-or-nothing rule §3.4 states for
+chunks. Partial application is forbidden here for the same reason.
 
 ### 3.2 Comparison and branchless select (high nibble `0x2`)
 
@@ -630,6 +731,8 @@ same change. Encoding changes are not a refactor.
 | 1.14 | 2026-11-08 | **F15 (finding).** §3.5 reserves `operand[47:0]` for `cap.*` and §7 requires a diagnostic for a non-zero reserved value, but the **decoder does not enforce it**, so a hand-built or loaded image carries the bits through silently — `0x5023400000000000` disassembles as `cap.load R2, R3`, exit 0. Every other class rejects its own reservation through the decoder (`thread.*` §3.7, and the §3.6 accelerator `reserved[39:32]`); `cap.*` is the only exception. The assembler refuses to *emit* such a word, but the assembler never sees a blob, and blobs are the primary input of `run-bin` — the same "the assembler is not the only entry point" reasoning that produced the VM half of F8. `cap.*` is also absent from `tools/audit-reserved.sh` in both halves, presence and falsification, which is why the gap survived this long. **Status at the time of writing: the decoder check and the audit entry were both still outstanding (task-24); this row records the defect, not a fix.** |
 
 | 1.16 | 2026-11-09 | **F19–F30 fixed, and two findings corrected.** Every defect recorded in 1.15 is now closed in code, on both layers where a layer existed to close. **The seven field-loss defects (F20, F21, F22, F23, F25, F26, F29) are one fix:** a word whose mnemonic cannot name every bit it carries is rendered as `.raw opcode, operand, rd, rs1` and re-assembled exactly, instead of dropping the unnamed field. `.raw` is consequently no longer restricted to the accelerator range 0x60–0x8F — that restriction made the fallback unassemblable, which is worse than the loss it replaced. **F19** closed by making §3.4 explicit: `stream.setp` names its pointer with `rd` and reserves `rs1` and `operand[47:40]`; the decoder and the assembler both reject violations. **F24** (`offset + width <= 64`, §3.3.1), **F27** (§4: `PC` in `rs1`/`rs2` is a diagnostic error) and **F23** (§3.7: `rs1` is defined for `thread.spawn` only) are now enforced **in the decoder as well as the assembler** — all three shared the F8 shape, where a rule enforced only at assembly time is unenforced on the `run-bin` path. **Two findings in 1.15 were wrong and are corrected here, not overwritten.** (a) **F30 is retracted:** it claimed §3.2.1 reserves `compare`'s `operand[35:0]`, but §3.2.1 states no bit layout at all — it defines only the status enum. `compare` correctly follows §3.1's ALU layout, and the recorded word `0x20D1600000000800` is handled correctly (`zero[39:28] = 0`, `imm28 = 0x800 = 2048`); nothing is dropped. (b) **F29 was misattributed:** it recorded a lost `trueReg`, but the lost field is the **§5 width suffix**, which `compare`'s renderer never emitted (`0x201D830000000000` → `...80...`). Fixed by emitting the suffix, and the assembler now parses it. **F28 is correct behaviour, not a defect:** `cap.load R7, R5` has a zero operand and decodes legally; only the assembler's §3.5 even-index rule refuses the odd `rs1`, and the decoder accepting a well-formed word from a blob is right. **A further VM defect was found while fixing F19:** `vm.zig`'s `stream.setp` wrote `rs1` instead of `rd`, so the instruction updated R0 and left the named pointer untouched — invisible while a test fixture set `rs1` by hand. **Also fixed:** a test fixture encoded the `setp` stride as `@bitCast(@as(i48, -16))`, sign-extending into the reserved `operand[47:40]` and producing `0xFFFFFFFFFFF0` — a word the assembler never emits. Verified: 39/39 build steps, 452/452 tests, all four cross-check programs byte-identical, fuzzer `checked=11592 identical=11592` with rejections up from 1669 to 3923 and no loss of round-trip fidelity. |
+
+| 1.17 | 2026-11-09 | **Three instructions added: `branch` (0x05), `load` (0x1A), `store` (0x1B).** Every revision through 1.16 defined `jump`, `call` and `ret` — **all unconditional** — and nothing else, so the ISA **could not express a loop**. Not inefficiently: not at all. The consequence was visible in two places already recorded as defects: `benchmarks/bench.zig`'s "element-by-element loop" was unrolled by the **Zig generator at build time** because the ISA had no way to express the loop, and F32's two "shapes" were one instruction at two chunk sizes because no second shape could be written. Likewise the only memory-touching opcodes were the fused `stream.*` engine and the decode-only `cap.*`, so a single-element fetch-modify-write was **not expressible** — `mov R5, [R4]` was rejected. **`branch` (§3.0.1)** tests the status enum `compare` already produces, so no flags register is introduced and the branchless-predication design is unchanged; its offset is a signed 28-bit displacement **relative to the branch itself**, not the absolute `imm48` that `jump`/`call` use, because a compiler can emit a relative offset for a forward reference without knowing the final layout. **`load`/`store` (§3.1.1)** are the scalar counterpart to the fused engine, inheriting §3.1's operand layout with `rs1` as the base and a signed 28-bit displacement; they do **not** post-increment, because auto-increment belongs to the stream engine and a scalar access that moved its own base would be unusable for random access. **Four defects were found while implementing this, three by the round-trip fuzzer within one run:** (a) the assembler's `.control` encoder arm handled only `jump`/`call`, so `branch` assembled to operand 0 — a branch testing EQUAL against offset 0 that fell through, making **every loop run forever**; (b) `branch`'s width nibble was first specified as "checked for validity but not used", which the fuzzer disproved by round-tripping a word through an encoder that dropped it — a field that is *validated* but *dropped* loses four bits silently, the F20–F26 class, so it is now reserved-and-rejected; (c) the decoder accepted a branch offset that is **not a multiple of 8**, which the assembler refused, so a blob could branch into the middle of an instruction — the F24/F27 two-layer shape; (d) `load`/`store` accepted a surplus third operand and silently discarded it, the F12/F19 class. All four are fixed and pinned by tests. Verified: 556/556 tests, fuzzer `checked=11839 identical=11839` (up from 11592), a real loop summing 8 loaded elements computes 180 in 63 instructions, and the new instructions round-trip byte-identically. |
 
 The Phase 4 RTL consumes §2–§5 directly, so an encoding change now invalidates the RTL
 and its testbench as well as the four software components above.

@@ -62,6 +62,7 @@ pub const Opcode = enum(u8) {
     jump = 0x02,
     call = 0x03,
     ret = 0x04,
+    branch = 0x05,
 
     add = 0x10,
     sub = 0x11,
@@ -73,6 +74,8 @@ pub const Opcode = enum(u8) {
     shl = 0x17,
     shr = 0x18,
     mov = 0x19,
+    load = 0x1A,
+    store = 0x1B,
 
     compare = 0x20,
     select = 0x21,
@@ -108,6 +111,9 @@ pub const Opcode = enum(u8) {
             .stream_copy => "stream.copy",
             .stream_fill => "stream.fill",
             .stream_setp => "stream.setp",
+            .branch => "branch",
+            .load => "load",
+            .store => "store",
             .cap_load => "cap.load",
             .cap_store => "cap.store",
             .cap_check => "cap.check",
@@ -145,6 +151,9 @@ pub const Opcode = enum(u8) {
             0x41 => .stream_copy,
             0x42 => .stream_fill,
             0x43 => .stream_setp,
+            0x05 => .branch,
+            0x1A => .load,
+            0x1B => .store,
             0x50 => .cap_load,
             0x51 => .cap_store,
             0x52 => .cap_check,
@@ -167,6 +176,39 @@ pub const Control = struct {
     opcode: u8,
     /// `imm48[47:0]` — target address, zero-extended to 64 bits.
     target: u64,
+};
+
+/// §3.0.1 `branch` — a status-enum test plus a PC-relative offset.
+pub const Branch = struct {
+    op: u8,
+    /// The register holding a status enum produced by `compare` (§3.2.1).
+    rs1: u4,
+    /// The enum value to test against, 0..=4. Validated at decode.
+    match_val: u4,
+    /// Signed byte offset from the ADDRESS OF THE BRANCH INSTRUCTION, not from
+    /// the following instruction — see §3.0.1. `jump`/`call` use an absolute
+    /// imm48; the difference is deliberate.
+    offset: i64,
+    /// Raw operand, for the `.raw` fallback (F20-F26/F29 family).
+    operand: u48 = 0,
+};
+
+/// §3.1.1 scalar memory access: `load rd, [rs1+imm]` / `store rs2, [rs1+imm]`.
+pub const Mem = struct {
+    op: u8,
+    /// `load`: the destination. `store`: unused, must be zero.
+    rd: u4,
+    /// The base address register.
+    rs1: u4,
+    /// `store`: the value source. `load`: unused, must be zero.
+    rs2: u4,
+    /// Access width, §5. For `load` this is the destination's suffix; for
+    /// `store` the source's.
+    width: Width,
+    /// Signed 28-bit byte displacement from `rs1`.
+    offset: i64,
+    /// Raw operand, for the `.raw` fallback.
+    operand: u48 = 0,
 };
 
 /// §3.1 ALU, and §3.2 `compare`, which shares the same operand layout.
@@ -287,6 +329,7 @@ pub const Instruction = union(enum) {
     jump: Control,
     call: Control,
     ret,
+    branch: Branch,
 
     add: Alu,
     sub: Alu,
@@ -298,6 +341,8 @@ pub const Instruction = union(enum) {
     shl: Alu,
     shr: Alu,
     mov: Alu,
+    load: Mem,
+    store: Mem,
 
     compare: Alu,
     select: Select,
@@ -352,6 +397,9 @@ pub fn opcodeOf(ins: Instruction) u8 {
         .stream_copy => |s| s.op,
         .stream_fill => |s| s.op,
         .stream_setp => |s| s.op,
+        .branch => |b| b.op,
+        .load => |m| m.op,
+        .store => |m| m.op,
         .cap_load => |c| c.op,
         .cap_store => |c| c.op,
         .cap_check => |c| c.op,
@@ -440,6 +488,7 @@ pub fn decode(word: u64) DecodeResult {
         0x00 => noOperandOrErrNop(word, rd, rs1, operand),
         0x01 => noOperandOrErrHalt(word, rd, rs1, operand),
         0x04 => controlOrErr(.ret, word, op_byte, rd, rs1, operand),
+        0x05 => branchOrErr(word, op_byte, rd, rs1, operand),
         0x02 => controlOrErr(.jump, word, op_byte, rd, rs1, operand),
         0x03 => controlOrErr(.call, word, op_byte, rd, rs1, operand),
 
@@ -453,6 +502,8 @@ pub fn decode(word: u64) DecodeResult {
         0x17 => aluOrErr(.shl, word, op_byte, rd, rs1, operand),
         0x18 => aluOrErr(.shr, word, op_byte, rd, rs1, operand),
         0x19 => aluOrErr(.mov, word, op_byte, rd, rs1, operand),
+        0x1A => memOrErr(.load, word, op_byte, rd, rs1, operand),
+        0x1B => memOrErr(.store, word, op_byte, rd, rs1, operand),
         0x20 => aluOrErr(.compare, word, op_byte, rd, rs1, operand),
 
         0x21 => selectOrErr(word, rd, rs1, operand),
@@ -548,6 +599,152 @@ fn controlOrErr(comptime tag: Opcode, word: u64, op_byte: u8, rd: u4, rs1: u4, o
         .jump => .{ .jump = .{ .opcode = op_byte, .target = @as(u64, operand) } },
         else => .{ .call = .{ .opcode = op_byte, .target = @as(u64, operand) } },
     } };
+}
+
+/// §3.0.1 `branch`: rs1 = status register, operand[47:44] = match value,
+/// operand[43:40] = width, operand[39:28] reserved, operand[27:0] = signed
+/// byte offset RELATIVE to the branch instruction.
+fn branchOrErr(word: u64, op_byte: u8, rd: u4, rs1: u4, operand: u48) DecodeResult {
+    // `rd` has no meaning for a branch: the target is an immediate offset, and
+    // nothing is written back. A non-zero value is rejected rather than ignored,
+    // the same rule jump/call/ret already follow.
+    if (rd != 0) return .{ .err = branchUnusedBitsDiagnostic(word) };
+
+    const match_raw: u4 = @truncate(operand >> 44);
+    if (match_raw > 4) return .{ .err = branchMatchDiagnostic(word, match_raw) };
+
+    const reserved: u12 = @truncate(operand >> 28);
+    if (reserved != 0) return .{ .err = branchReservedBitsDiagnostic(word, reserved) };
+
+    // §3.0.1: operand[43:40] is RESERVED for a branch. A branch narrows nothing,
+    // so the field carries no information — and "validate it but drop it" would
+    // let a word decode, lose four bits on re-emit, and re-assemble differently.
+    // The round-trip fuzzer caught exactly that. Reserved means rejected when set.
+    const raw_width: u4 = @truncate(operand >> 40);
+    if (raw_width != 0) return .{ .err = branchReservedBitsDiagnostic(word, raw_width) };
+
+    const raw_off: u28 = @truncate(operand);
+    const offset = @as(i64, @as(i28, @bitCast(raw_off)));
+
+    // §1: every instruction is 8 bytes, so a branch offset that is not a multiple
+    // of 8 cannot name an instruction boundary. The assembler enforced this; the
+    // decoder did not, so a blob could carry a branch to the middle of an
+    // instruction — and the round-trip fuzzer caught it, because such a word
+    // renders as text the assembler then refuses. The three `branch` checks form
+    // the by-now-standard two-layer rule: the assembler is not the only entry
+    // point, and `run-bin` loads images it never sees.
+    if (@rem(offset, 8) != 0) return .{ .err = branchUnalignedDiagnostic(word, offset) };
+
+    return .{ .ok = .{ .branch = .{
+        .op = op_byte,
+        .rs1 = rs1,
+        .match_val = match_raw,
+        .offset = offset,
+        .operand = operand,
+    } } };
+}
+
+/// §3.1.1 `load`/`store`.
+fn memOrErr(comptime tag: Opcode, word: u64, op_byte: u8, rd: u4, rs1: u4, operand: u48) DecodeResult {
+    const raw_rs2: u4 = @truncate(operand >> 44);
+
+    // `load` writes rd and has no source register; `store` reads rs2 and writes
+    // nothing. Either way the unused field must be zero, enforced HERE as well as
+    // in the assembler because `run-bin` loads blobs the assembler never sees.
+    if (tag == .load and raw_rs2 != 0) return .{ .err = memUnusedSourceDiagnostic(word) };
+    if (tag == .store and rd != 0) return .{ .err = memUnusedDestDiagnostic(word) };
+
+    const reserved: u12 = @truncate(operand >> 28);
+    if (reserved != 0) return .{ .err = aluReservedBitsDiagnostic(word, reserved) };
+
+    const raw_width: u4 = @truncate(operand >> 40);
+    const width = Width.fromEncoded(raw_width) catch return .{ .err = widthDiagnostic(op_byte, raw_width) };
+
+    const raw_off: u28 = @truncate(operand);
+    const m = Mem{
+        .op = op_byte,
+        .rd = rd,
+        .rs1 = rs1,
+        .rs2 = raw_rs2,
+        .width = width,
+        .offset = @as(i64, @as(i28, @bitCast(raw_off))),
+        .operand = operand,
+    };
+    return switch (tag) {
+        .load => .{ .ok = .{ .load = m } },
+        else => .{ .ok = .{ .store = m } },
+    };
+}
+
+fn branchUnusedBitsDiagnostic(word: u64) Diagnostic {
+    return .{
+        .stage = "decoding this instruction",
+        .action = "decoded",
+        .word = word,
+        .operand = .{ .index = 1, .name = "destination register field", .text = "non-zero" },
+        .expected = "the destination register field to be zero, because a branch carries its target as an immediate offset and writes nothing back (docs/isa-encoding.md §3.0.1)",
+        .detail = "The instruction was not decoded; unused bits are rejected rather than ignored, so the encoding cannot silently acquire a meaning later.",
+    };
+}
+
+fn branchMatchDiagnostic(word: u64, value: u4) Diagnostic {
+    var buf: [16]u8 = undefined;
+    const text = std.fmt.bufPrint(&buf, "{d}", .{value}) catch "an undefined value";
+    return .{
+        .stage = "decoding this instruction",
+        .action = "decoded",
+        .word = word,
+        .operand = .{ .index = 2, .name = "branch match value", .text = text },
+        .expected = "one of the five status enum values EQUAL, LESS, GREATER, UNSIGNED_LESS or UNSIGNED_GREATER, from 0 to 4 (docs/isa-encoding.md §3.2.1)",
+        .detail = "The instruction was not decoded; a branch testing a value that is not a status enum would never fire, which is far more likely a mistake than an intent.",
+    };
+}
+
+fn branchUnalignedDiagnostic(word: u64, offset: i64) Diagnostic {
+    var buf: [32]u8 = undefined;
+    const text = std.fmt.bufPrint(&buf, "{d}", .{offset}) catch "an unaligned offset";
+    return .{
+        .stage = "decoding this instruction",
+        .action = "decoded",
+        .word = word,
+        .operand = .{ .index = 3, .name = "branch offset", .text = text },
+        .expected = "a byte offset that is a multiple of 8, because every instruction is 8 bytes and an offset that is not a multiple of 8 cannot name an instruction boundary (docs/isa-encoding.md §1)",
+        .detail = "The instruction was not decoded; the assembler refuses this form, and the decoder must not accept what the assembler rejects.",
+    };
+}
+
+fn branchReservedBitsDiagnostic(word: u64, reserved: u12) Diagnostic {
+    std.debug.assert(reserved != 0);
+    return .{
+        .stage = "decoding this instruction",
+        .action = "decoded",
+        .word = word,
+        .operand = .{ .index = 3, .name = "reserved branch field", .text = "non-zero" },
+        .expected = "operand[39:28] to be zero, because the branch layout reserves those bits (docs/isa-encoding.md §3.0.1)",
+        .detail = "The instruction was not decoded; reserved means rejected when set, not ignored.",
+    };
+}
+
+fn memUnusedSourceDiagnostic(word: u64) Diagnostic {
+    return .{
+        .stage = "decoding this instruction",
+        .action = "decoded",
+        .word = word,
+        .operand = .{ .index = 2, .name = "source register field", .text = "non-zero" },
+        .expected = "the second-source register field to be zero, because `load` reads memory into rd and has no source register (docs/isa-encoding.md §3.1.1)",
+        .detail = "The instruction was not decoded; unused bits are rejected rather than ignored, so a loaded image cannot carry bits no source line can express.",
+    };
+}
+
+fn memUnusedDestDiagnostic(word: u64) Diagnostic {
+    return .{
+        .stage = "decoding this instruction",
+        .action = "decoded",
+        .word = word,
+        .operand = .{ .index = 1, .name = "destination register field", .text = "non-zero" },
+        .expected = "the destination register field to be zero, because `store` writes memory and has no destination register (docs/isa-encoding.md §3.1.1)",
+        .detail = "The instruction was not decoded; unused bits are rejected rather than ignored.",
+    };
 }
 
 fn controlUnusedBitsDiagnostic(word: u64) Diagnostic {
@@ -707,6 +904,9 @@ pub fn encode(ins: Instruction) u64 {
         .stream_fill => |s| encodeStream(s),
         .stream_setp => |s| encodeStream(s),
 
+        .branch => |b| encodeBranch(b),
+        .load => |m| encodeMem(m),
+        .store => |m| encodeMem(m),
         .cap_load => |c| assembleWord(c.op, c.rd, c.rs1, 0),
         .cap_store => |c| assembleWord(c.op, c.rd, c.rs1, 0),
         .cap_check => |c| assembleWord(c.op, c.rd, c.rs1, 0),
@@ -722,6 +922,23 @@ pub fn encode(ins: Instruction) u64 {
 /// §2: opcode[63:56] | rd[55:52] | rs1[51:48] | operand[47:0].
 pub fn assembleWord(opcode: u8, rd: u4, rs1: u4, operand: u48) u64 {
     return (@as(u64, opcode) << 56) | (@as(u64, rd) << 52) | (@as(u64, rs1) << 48) | @as(u64, operand);
+}
+
+/// §3.0.1: rs2[47:44] = match value, width[43:40], reserved[39:28] = 0,
+/// offset[27:0] = signed byte displacement from the branch itself.
+fn encodeBranch(b: Branch) u64 {
+    const raw_off: u28 = @truncate(@as(u64, @bitCast(b.offset)));
+    const operand: u48 = (@as(u48, b.match_val) << 44) | raw_off;
+    return assembleWord(b.op, 0, b.rs1, operand);
+}
+
+/// §3.1.1: rs2[47:44], width[43:40], reserved[39:28] = 0, offset[27:0].
+fn encodeMem(m: Mem) u64 {
+    const raw_off: u28 = @truncate(@as(u64, @bitCast(m.offset)));
+    const operand: u48 = (@as(u48, m.rs2) << 44) |
+        (@as(u48, @intFromEnum(m.width)) << 40) |
+        raw_off;
+    return assembleWord(m.op, m.rd, m.rs1, operand);
 }
 
 /// §3.1: rs2[47:44], width[43:40], signed imm28[39:0]. `imm == null` means

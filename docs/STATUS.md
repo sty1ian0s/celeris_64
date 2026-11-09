@@ -1372,3 +1372,76 @@ llvm-mc oracle tests          -> 3 ISAs, encodings checked byte-for-byte
 ```
 
 Test count rose from 453 to 555: 43 in `crossarch.zig` plus 59 in the four ISA roots.
+
+---
+
+## F34: the ISA could not express a loop (v1.17)
+
+**The request was to finish the core ISA. Finishing it revealed that it was not
+merely incomplete — it could not express an ordinary program.**
+
+Every revision through v1.16 defined `jump`, `call` and `ret`, **all
+unconditional**, and nothing else. So:
+
+- **No loop was expressible.** `compare` + `select` implement branchless *value*
+  selection, which is the architecture's stated design, but `select` chooses a
+  value, never a control-flow target.
+- **No scalar memory access was expressible.** The only memory-touching opcodes were
+  the fused `stream.*` engine and the decode-only `cap.*`. `mov R5, [R4]` was
+  rejected by the assembler because no memory operand form existed.
+
+Both facts were already recorded as *symptoms* without their cause being named:
+`benchmarks/bench.zig`'s "element-by-element loop" was unrolled by the **Zig
+generator at build time** because the ISA could not express the loop, and F32's two
+"shapes" were one instruction at two chunk sizes because no second shape could be
+written. The cause of both was this gap.
+
+### What was added
+
+| Opcode | Mnemonic | Why this form |
+|---|---|---|
+| `0x05` | `branch rs1, [MATCH], offset` | Tests the **status enum `compare` already produces**, so no flags register is introduced and the predication design is unchanged. Offset is **relative to the branch itself**, because a compiler can emit a relative offset for a forward reference without knowing the layout. |
+| `0x1A` | `load rd, [rs1+off]` | Scalar counterpart to the fused engine. |
+| `0x1B` | `store rs2, [rs1+off]` | No post-increment: auto-increment belongs to the engine, and a scalar access that moved its own base would be unusable for random access. |
+
+### Four defects found while implementing it, three by the fuzzer in one run
+
+1. **Every loop ran forever.** The assembler's `.control` encoder arm handled only
+   `jump`/`call`, so a `branch` assembled to **operand 0** — testing `EQUAL` against
+   an offset of 0, always falling through. The first loop written for CLS64 did not
+   halt. Found by running it.
+2. **"Validated but dropped" is not a rule.** `branch`'s width nibble was first
+   specified as "checked for validity but not used". The fuzzer disproved it
+   immediately: a word with a non-zero nibble decoded, **lost four bits on
+   re-emit**, and re-assembled to a different word — the F20–F26 class exactly. The
+   field is now reserved-and-rejected. *A field that is validated but dropped is
+   worse than an undocumented one, because the validation implies it is handled.*
+3. **The decoder accepted an unaligned branch offset** that the assembler refused.
+   Fuzzer-found. Since every instruction is 8 bytes, such an offset cannot name an
+   instruction boundary — a blob could branch into the middle of one. The F24/F27
+   two-layer shape, now enforced in the decoder as well.
+4. **`load`/`store` accepted a surplus operand and silently discarded it.** Found by
+   hand after the other three. `load R6, [R1+0], R7` assembled and dropped `R7` —
+   the F12/F19 class.
+
+### Verification
+
+```
+zig build test --summary all  -> 49/49 steps, 556/556 tests, exit 0   (clean rebuild)
+fuzzer                        -> checked=11839 identical=11839  (up from 11592)
+end-to-end loop               -> sums 8 loaded elements to 180, halts in 63 instructions
+round trip                    -> the new instructions are byte-identical through dis -> asm
+```
+
+The end-to-end loop is the proof that matters: it uses `compare` to produce the
+status, `branch` to test it, and `load` to fetch each element, and it produces the
+correct sum. Before v1.17 that program could not be written at all.
+
+### What this does NOT close
+
+`cap.*` remains decode-only (§3.5 v1.12: the register pair has no `length` bit
+position, so a capability cannot be reconstructed — a §6 redesign, not a bug fix).
+The accelerators remain unwired: `matrix.zig`, `fft.zig` and `codec.zig` are
+imported by **no other file**, so `0x60`–`0x8F` decodes to an opaque payload and
+executes nothing. That is the next piece of the core, and it is why the
+cross-architecture table's CLS64 row still cannot be compared fairly.

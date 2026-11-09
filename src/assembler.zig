@@ -156,6 +156,7 @@ pub const Opcode = enum(u8) {
     jump = 0x02,
     call = 0x03,
     ret = 0x04,
+    branch = 0x05,
 
     add = 0x10,
     sub = 0x11,
@@ -167,6 +168,8 @@ pub const Opcode = enum(u8) {
     shl = 0x17,
     shr = 0x18,
     mov = 0x19,
+    load = 0x1A,
+    store = 0x1B,
 
     compare = 0x20,
     select = 0x21,
@@ -203,6 +206,9 @@ pub const Opcode = enum(u8) {
             .stream_copy => "stream.copy",
             .stream_fill => "stream.fill",
             .stream_setp => "stream.setp",
+            .branch => "branch",
+            .load => "load",
+            .store => "store",
             .cap_load => "cap.load",
             .cap_store => "cap.store",
             .cap_check => "cap.check",
@@ -256,8 +262,8 @@ pub const Opcode = enum(u8) {
     pub fn kind(self: Opcode) Kind {
         if (self == .accelerator) return .accelerator;
         const v = @intFromEnum(self);
-        if (v <= 0x04) return .control;
-        if (v >= 0x10 and v <= 0x19) return .alu;
+        if (v <= 0x05) return .control;
+        if (v >= 0x10 and v <= 0x1B) return .alu;
         if (v == 0x20 or v == 0x21) return .compare_select;
         if (v == 0x30 or v == 0x31) return .field;
         if (v >= 0x40 and v <= 0x43) return .stream;
@@ -326,14 +332,33 @@ pub const Instruction = struct {
 
         switch (self.opcode.kind()) {
             .control => {
-                if (self.opcode == .jump or self.opcode == .call) {
+                if (self.opcode == .branch) {
+                    // §3.0.1: rs2[47:44] = match value, width[43:40], reserved
+                    // [39:28] = 0, offset[27:0] = signed byte displacement. This arm
+                    // previously handled only jump/call, so a `branch` assembled to
+                    // operand 0 — a branch that tested EQUAL against a zero offset
+                    // and fell through, making every loop run forever.
+                    // §3.0.1: [43:40] is reserved for a branch, so no width is
+                    // written. A branch narrows nothing.
+                    out |= @as(u64, @intFromEnum(self.match)) << 44;
+                    out |= @as(u64, @bitCast(self.imm)) & 0x0FFF_FFFF;
+                } else if (self.opcode == .jump or self.opcode == .call) {
                     out |= @as(u64, @bitCast(self.imm)) & 0xFFFF_FFFF_FFFF;
                 }
             },
             .alu => {
-                out |= @as(u64, self.rs2) << 44;
-                out |= @as(u64, @intFromEnum(self.width)) << 40;
-                out |= @as(u64, @bitCast(self.imm)) & 0x0FFF_FFFF;
+                if (self.opcode == .load or self.opcode == .store) {
+                    // §3.1.1: same layout as §3.1, but `rs1` is the base register
+                    // and already placed above, and offset[27:0] is the signed
+                    // displacement. `load` leaves rs2 zero, `store` sets it.
+                    out |= @as(u64, self.rs2) << 44;
+                    out |= @as(u64, @intFromEnum(self.width)) << 40;
+                    out |= @as(u64, @bitCast(self.imm)) & 0x0FFF_FFFF;
+                } else {
+                    out |= @as(u64, self.rs2) << 44;
+                    out |= @as(u64, @intFromEnum(self.width)) << 40;
+                    out |= @as(u64, @bitCast(self.imm)) & 0x0FFF_FFFF;
+                }
             },
             .compare_select => {
                 if (self.opcode == .compare) {
@@ -605,13 +630,17 @@ const LineParser = struct {
 
     fn run(self: *LineParser, out: *Diagnostic) error{ AssemblyFailed, OutOfMemory }!Instruction {
         return switch (self.op.kind()) {
-            .control => self.runControl(out),
-            .alu => self.runAlu(out),
+            .control => if (self.op == .branch) self.runBranch(out) else self.runControl(out),
+            .alu => if (self.op == .load or self.op == .store) self.runMem(out) else self.runAlu(out),
             .compare_select => if (self.op == .compare) self.runAlu(out) else self.runSelect(out),
             .field => self.runField(out),
             .stream => self.runStream(out),
             .capability => self.runCapability(out),
             .thread => self.runThread(out),
+            // `branch` is in the control group (0x05) and load/store in the ALU
+            // group (0x1A/0x1B), so they are separated by opcode here rather than
+            // by adding new Kind values — the Kind enum tracks the §3 group, and
+            // these are the odd members of groups that already exist.
             .accelerator => self.runAccelerator(out),
             .unknown => self.fail(out, "mnemonic", self.mnemonic, "an instruction defined in the Celeris-64 opcode map"),
         };
@@ -633,6 +662,78 @@ const LineParser = struct {
                 insn.imm = self.parseImm(tok, out, "target address") catch |e| return e;
             },
             else => {},
+        }
+        return insn;
+    }
+
+    /// §3.0.1: `branch rs1, [MATCH], offset`.
+    fn runBranch(self: *LineParser, out: *Diagnostic) !Instruction {
+        var insn = Instruction{ .opcode = self.op };
+
+        const reg_tok = self.nextField() orelse
+            return self.failMissing(out, "status register", "the register holding a status enum from `compare`");
+        insn.rs1 = try self.parseSourceReg(reg_tok, out, "status register");
+
+        // The match value is written in brackets, `[LESS]`, matching the spec's
+        // spelling for `select`.
+        const match_tok = self.nextField() orelse
+            return self.failMissing(out, "match value", "a status name in brackets, such as [EQUAL]");
+        const name = std.mem.trim(u8, match_tok, " \t");
+        const inner = if (name.len >= 2 and name[0] == '[' and name[name.len - 1] == ']')
+            name[1 .. name.len - 1]
+        else
+            return self.fail(out, "match value", match_tok, "a status name in brackets, such as [EQUAL]");
+        insn.match = Status.fromName(inner) orelse
+            return self.fail(out, "match value", match_tok, "one of [EQUAL], [LESS], [GREATER], [UNSIGNED_LESS] or [UNSIGNED_GREATER] (docs/isa-encoding.md §3.2.1)");
+
+        const off_tok = self.nextField() orelse
+            return self.failMissing(out, "branch offset", "a byte offset relative to this branch");
+        const off = self.parseImm(off_tok, out, "branch offset") catch |e| return e;
+        if (off < -0x800_0000 or off > 0x7FF_FFFF) {
+            return self.fail(out, "branch offset", off_tok, "an offset that fits in the signed 28-bit field, from -134217728 to 134217727");
+        }
+        if (@rem(off, 8) != 0) {
+            return self.fail(out, "branch offset", off_tok, "a multiple of 8, because every instruction is 8 bytes and an offset that is not a multiple of 8 cannot name an instruction boundary (docs/isa-encoding.md §1)");
+        }
+        insn.imm = off;
+        return insn;
+    }
+
+    /// §3.1.1: `load rd, [rs1+off]` and `store rs2, [rs1+off]`.
+    fn runMem(self: *LineParser, out: *Diagnostic) !Instruction {
+        var insn = Instruction{ .opcode = self.op };
+        const is_load = self.op == .load;
+
+        const val_tok = self.nextField() orelse
+            return self.failMissing(out, if (is_load) "destination register" else "source register", "the register to load into or store from");
+        // The §5 suffix is on the value register, and it is the access size.
+        const idx = try self.parseRegWithWidth(val_tok, out, if (is_load) "destination register" else "source register", &insn);
+        if (is_load) {
+            insn.rd = idx;
+        } else {
+            insn.rs2 = idx;
+        }
+
+        const addr_tok = self.nextField() orelse
+            return self.failMissing(out, "address", "a bracketed base and displacement, such as [R4+16]");
+        const addr = parseBracketedAddress(addr_tok) orelse
+            return self.fail(out, "address", addr_tok, "a bracketed base register with an optional displacement, such as [R4], [R4+16] or [R4-8]");
+        insn.rs1 = try self.parseReg(addr.reg, out, "base register");
+        const off = self.parseImm(addr.disp, out, "displacement") catch |e| return e;
+        if (off < -0x800_0000 or off > 0x7FF_FFFF) {
+            return self.fail(out, "displacement", addr.disp, "a displacement that fits in the signed 28-bit field, from -134217728 to 134217727");
+        }
+        insn.imm = off;
+
+        // §3.1.1: `load` and `store` take exactly two operands. A surplus one has
+        // no field to live in, and accepting it silently is the F12/F19 defect
+        // class — a lexical form the encoding cannot represent, taken without
+        // complaint. `load R6, [R1+0], R7` assembled and dropped R7 entirely.
+        if (self.nextField()) |extra| {
+            return self.fail(out, "operand", extra, if (is_load)
+                "no further operand, because load takes a destination register and an address (docs/isa-encoding.md §3.1.1)"
+            else
+                "no further operand, because store takes a source register and an address (docs/isa-encoding.md §3.1.1)");
         }
         return insn;
     }
@@ -1394,6 +1495,35 @@ pub fn parseBracketedChunk(tok: []const u8) ?struct { reg: []const u8, chunk: []
         rest = std.mem.trim(u8, rest[1..], " \t");
     }
     return .{ .reg = reg, .chunk = rest };
+}
+
+/// `[R4+16]` -> { reg = "R4", disp = "+16" }. Accepts `[R4]` with no
+/// displacement, and both signs. The displacement is returned as TEXT so the
+/// caller reports an unparseable number with the user's own token.
+pub fn parseBracketedAddress(tok: []const u8) ?struct { reg: []const u8, disp: []const u8 } {
+    const open = std.mem.indexOfScalar(u8, tok, '[') orelse return null;
+    const close = std.mem.indexOfScalar(u8, tok, ']') orelse return null;
+    if (close < open) return null;
+    const inner = std.mem.trim(u8, tok[open + 1 .. close], " \t");
+    if (inner.len == 0) return null;
+
+    // Find the first + or - AFTER the first character, so a leading sign is not
+    // mistaken for the separator and register names stay intact.
+    var split: ?usize = null;
+    var i: usize = 1;
+    while (i < inner.len) : (i += 1) {
+        if (inner[i] == '+' or inner[i] == '-') {
+            split = i;
+            break;
+        }
+    }
+    if (split) |at| {
+        const reg = std.mem.trim(u8, inner[0..at], " \t");
+        const disp = std.mem.trim(u8, inner[at..], " \t");
+        if (reg.len == 0 or disp.len == 0) return null;
+        return .{ .reg = reg, .disp = disp };
+    }
+    return .{ .reg = inner, .disp = "0" };
 }
 
 /// `offset=12` -> { name = "offset", value = "12" }.

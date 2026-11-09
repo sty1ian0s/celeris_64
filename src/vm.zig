@@ -189,6 +189,68 @@ pub const Vm = struct {
                 return .advanced;
             },
 
+            // §3.0.1 `branch`: transfer when the status enum in rs1 equals the
+            // match value, otherwise fall through. This is the ISA's only
+            // conditional control transfer, and without it no loop can be written.
+            .branch => |b| {
+                self.retired += 1;
+                const status = self.regs.read(b.rs1) & 0xF;
+                if (status == b.match_val) {
+                    // The offset is relative to the BRANCH ITSELF, per §3.0.1 —
+                    // not to the following instruction. Computed with wrapping
+                    // arithmetic so a backward branch near address 0 wraps rather
+                    // than panicking; the fetch bounds check reports it.
+                    self.regs.pc = pc +% @as(u64, @bitCast(b.offset));
+                } else {
+                    self.regs.pc = pc +| instruction_bytes;
+                }
+                return .advanced;
+            },
+
+            // §3.1.1 scalar memory access. The whole access is bounds-checked
+            // before any byte moves, matching §3.4's all-or-nothing rule for
+            // chunks: a partially applied store is the failure mode that makes
+            // memory access untrustworthy.
+            .load => |m| {
+                self.retired += 1;
+                if (m.rd == pc_index) return try self.reportPcWrite("a load", pc, word);
+                const addr = self.regs.read(m.rs1) +% @as(u64, @bitCast(m.offset));
+                // §5 width: 0 = 64-bit, 1 = .l (32), 2 = .w (16), 3 = .b (8).
+                const raw: u64 = switch (m.width) {
+                    .full => self.mem.read64(addr) catch
+                        return try self.reportLoadStoreBounds("reading from memory", addr, 8, pc, word),
+                    .l => self.mem.read32(addr) catch
+                        return try self.reportLoadStoreBounds("reading from memory", addr, 4, pc, word),
+                    .w => self.mem.read16(addr) catch
+                        return try self.reportLoadStoreBounds("reading from memory", addr, 2, pc, word),
+                    .b => self.mem.read8(addr) catch
+                        return try self.reportLoadStoreBounds("reading from memory", addr, 1, pc, word),
+                };
+                // §2.1: a sub-width load ZERO-EXTENDS into rd, like every other
+                // sub-register write. read8/16/32 already return the widened value.
+                self.regs.write(m.rd, raw);
+                self.regs.pc = pc +| instruction_bytes;
+                return .advanced;
+            },
+
+            .store => |m| {
+                self.retired += 1;
+                const addr = self.regs.read(m.rs1) +% @as(u64, @bitCast(m.offset));
+                const v = self.regs.read(m.rs2);
+                switch (m.width) {
+                    .full => self.mem.write64(addr, v) catch
+                        return try self.reportLoadStoreBounds("writing to memory", addr, 8, pc, word),
+                    .l => self.mem.write32(addr, @truncate(v)) catch
+                        return try self.reportLoadStoreBounds("writing to memory", addr, 4, pc, word),
+                    .w => self.mem.write16(addr, @truncate(v)) catch
+                        return try self.reportLoadStoreBounds("writing to memory", addr, 2, pc, word),
+                    .b => self.mem.write8(addr, @truncate(v)) catch
+                        return try self.reportLoadStoreBounds("writing to memory", addr, 1, pc, word),
+                }
+                self.regs.pc = pc +| instruction_bytes;
+                return .advanced;
+            },
+
             // The decoder tags each ALU opcode individually (§3.1), so group the
             // ten of them onto the one execution path. Deleting this arm instead
             // would drop every ALU instruction into the fault below. `compare` is
@@ -361,6 +423,17 @@ pub const Vm = struct {
 
         // Auto-advance is the engine's whole point: no software index arithmetic.
         self.regs.write(st.rs1, engine.ptr);
+    }
+
+    /// §3.1.1: an out-of-bounds scalar access, reported in plain language with the
+    /// address and size that failed (AGENTS.md §4.2 forbids a bare hex code).
+    fn reportLoadStoreBounds(self: *Vm, action: []const u8, addr: u64, size: u64, pc: u64, word: u64) Fault!Step {
+        _ = pc;
+        _ = word;
+        // Matches the existing `faultOutOfBounds` pattern: record the sentence the
+        // caller will print, halt, and surface the error. Returning the text here
+        // would duplicate a rendering path the VM already has.
+        return self.faultOutOfBounds(action, addr, size);
     }
 
     fn reportStreamError(self: *Vm, err: StreamFault, pc: u64, word: u64) Fault!Step {
@@ -1528,4 +1601,68 @@ test "capability model round-trips through the VM's re-export and is not cryptog
     const child = try cap.narrow(0x20, 0x10, capability.Perms.all());
     try testing.expectEqual(@as(u64, 0x1020), child.base);
     try testing.expectEqual(@as(u64, 0x10), child.length);
+}
+
+test "v1.17: a real loop, using branch and load, computes the right answer" {
+    // The ISA could not express a loop before v1.17: every control transfer was
+    // unconditional. This test is the end-to-end proof that it can now, using the
+    // three new instructions together — `compare` produces the status enum,
+    // `branch` tests it, `load` fetches an element.
+    //
+    //   sum = 0; i = 0; ptr = data
+    //   loop: if (i == count) goto done
+    //         sum += *ptr; ptr += 8; i += 1; goto loop
+    //   done: halt
+    const data = [_]u64{ 5, 10, 15, 20, 25, 30, 35, 40 };
+    const base: u64 = 4096;
+    const count: u64 = 8;
+    const expected_sum: u64 = 180;
+
+    const words = [_]u64{
+        encode(0x19, 1, 0, aluOperand(0, .full, base)), // R1 = ptr
+        encode(0x19, 2, 0, aluOperand(0, .full, 0)), // R2 = sum
+        encode(0x19, 3, 0, aluOperand(0, .full, count)), // R3 = count
+        encode(0x19, 4, 0, aluOperand(0, .full, 0)), // R4 = i
+        // compare R4, R3 -> R5   (status enum into R5)
+        encode(0x20, 5, 4, aluOperand(3, .full, 0)),
+        // branch R5, [EQUAL], +48 -> halt
+        branchWord(5, 0, 48),
+        // load R6, [R1+0]
+        memWord(0x1A, 6, 1, 0, 0, 0),
+        encode(0x10, 2, 2, aluOperand(6, .full, 0)), // add R2, R2, R6
+        encode(0x10, 1, 1, aluOperand(0, .full, 8)), // add R1, R1, 8
+        encode(0x10, 4, 4, aluOperand(0, .full, 1)), // add R4, R4, 1
+        encode(0x02, 0, 0, 32), // jump 32 (back to the compare)
+        encode(0x01, 0, 0, 0), // halt
+    };
+
+    const img = try testing.allocator.alloc(u8, base + 128);
+    defer testing.allocator.free(img);
+    @memset(img, 0);
+    try loadWords(img, 0, &words);
+    for (data, 0..) |v, i| {
+        std.mem.writeInt(u64, img[@intCast(base + i * 8)..][0..8], v, .little);
+    }
+
+    var vm = Vm.init(img);
+    _ = try vm.run(10_000);
+    try testing.expect(vm.halted);
+    try testing.expectEqual(expected_sum, vm.regs.read(2)); // the sum
+    try testing.expectEqual(count, vm.regs.read(4)); // iterations completed
+}
+
+/// §3.0.1 `branch` word: rs1 = status register, rs2 = match value,
+/// offset[27:0] = signed byte displacement.
+fn branchWord(rs1: u4, match: u4, offset: i64) u64 {
+    const raw: u28 = @truncate(@as(u64, @bitCast(offset)));
+    return (@as(u64, 0x05) << 56) | (@as(u64, rs1) << 48) |
+        (@as(u64, match) << 44) | raw;
+}
+
+/// §3.1.1 `load`/`store` word: rs2 = source (store only), width[43:40],
+/// offset[27:0].
+fn memWord(op: u8, rd: u4, rs1: u4, rs2: u4, width: u4, offset: i64) u64 {
+    const raw: u28 = @truncate(@as(u64, @bitCast(offset)));
+    return (@as(u64, op) << 56) | (@as(u64, rd) << 52) | (@as(u64, rs1) << 48) |
+        (@as(u64, rs2) << 44) | (@as(u64, width) << 40) | raw;
 }

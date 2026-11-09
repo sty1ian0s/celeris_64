@@ -72,6 +72,38 @@ pub const Rng = struct {
             0x00, 0x01, 0x04 => return (@as(u64, op) << 56),
             0x02, 0x03 => return (@as(u64, op) << 56) | (self.next() & 0xFFFF_FFFF_FFFF),
 
+            // branch §3.0.1 (v1.17): rd must be zero, rs2[47:44] is a match value
+            // in 0..=4, width[43:40] must be a valid §5 nibble, [39:28] reserved,
+            // and [27:0] a signed byte offset. Every one of those constraints is
+            // enforced by the decoder, so the generator must respect them or it
+            // would only ever produce rejected words and test nothing.
+            0x05 => {
+                const match: u64 = self.next() % 5;
+                const off: u28 = @truncate(self.next());
+                // rd and the width nibble are both reserved for a branch: a
+                // non-zero value in either is a rejected word, so the generator
+                // must leave them zero or it would only test the rejection path.
+                return (@as(u64, 0x05) << 56) | (rs1 << 48) |
+                    (@as(u64, match) << 44) | @as(u64, off);
+            },
+
+            // load/store §3.1.1 (v1.17): rs1 is the base, rs2 is the store source
+            // (reserved-zero for load), width[43:40] is the access size, and
+            // [39:28] is reserved. The unused register field must be zero.
+            0x1A, 0x1B => {
+                const width: u64 = self.next() % 4;
+                const off: u28 = @truncate(self.next());
+                if (op == 0x1A) {
+                    // load: rd is the destination, rs2 must be zero.
+                    return (@as(u64, op) << 56) | (rd << 52) | (rs1 << 48) |
+                        (width << 40) | @as(u64, off);
+                }
+                // store: rd must be zero, rs2 is the value source.
+                const src: u64 = self.next() % 16;
+                return (@as(u64, op) << 56) | (rs1 << 48) |
+                    (src << 44) | (width << 40) | @as(u64, off);
+            },
+
             // ALU §3.1: rs2[47:44] width[43:40] zero[39:28] imm28[27:0].
             // Emit the REGISTER form, and sometimes the immediate form with
             // rs2 deliberately zero (the only form the assembler can produce).
@@ -153,7 +185,9 @@ pub const Rng = struct {
 fn knownOpcodes() []const u8 {
     return &.{
         0x00, 0x01, 0x02, 0x03, 0x04, // nop halt jump call ret
+        0x05, // branch (§3.0.1, v1.17)
         0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, // ALU
+        0x1A, 0x1B, // load, store (§3.1.1, v1.17)
         0x20, 0x21, // compare select
         0x30, 0x31, // field.*
         0x40, 0x41, 0x42, 0x43, // stream.*
