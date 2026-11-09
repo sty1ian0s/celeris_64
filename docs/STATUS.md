@@ -2076,3 +2076,89 @@ that is only visible against `docs/isa-encoding.md` §3.6 — not against itself
 **This is the second time in this session that a green gate hid a disagreement** (F37's
 decoder was the first). Both were found by asking what a passing check actually
 *asserts*, not by watching for failure.
+
+---
+
+## F41: the example suite's eighth kernel was attempted twice and landed neither time
+
+**Status: open — and the honest outcome is "not delivered", not "blocked by a defect".**
+No code changed. `src/examples.zig` is byte-identical to `f3826f2`. This entry exists so
+the next attempt does not restart from zero, which is the only thing two attempts at this
+produced that is worth keeping.
+
+Both attempts stopped for the **same reason and both stopped correctly**: each wrote a
+kernel whose CLS64 program did not actually compute what the other three did, and each
+caught it and reverted rather than shipping it. Neither failure was a repository defect.
+The suite still passes: 7 kernels x 4 ISAs, `zig build examples` exit 0.
+
+### The interesting part is *why* CLS64 kept silently ceasing to be equivalent
+
+Both drafts diverged at exactly one place: **CLS64 needs more instructions than the other
+three to express the same operation, and cutting those extra instructions does not make
+the program slower — it makes it WRONG, with no assembler or decoder complaint.**
+
+The second attempt's kernel was a 32-bit rotate. The draft computed `x << 3` and summed
+that, where RISC-V, AArch64 and x86-64 computed `rotl(x, 3)`. It assembled, it ran, and it
+produced a plausible count. It was caught by comparing against the reference: **64 of 64
+words mismatched** (word 0: reference `0x04F20925`, draft `0xFDF6FB70`). Kept, it would
+have been a kernel whose numbers were measured from a program that did a different
+computation — the exact class of faked claim the suite exists to prevent.
+
+**The verified shape, so a successor does not re-derive it.** CLS64 *can* express the
+rotate, but the `_ .l` narrowing does not discard bits above 32 and `shl` does not
+truncate, so the round trip through a scratch word is load-bearing:
+
+```
+shl -> store to a scratch word -> shr by 32 -> load the original -> or -> store back
+```
+
+Removing the scratch-word round trip (the "obvious optimisation") silently stops the
+program being a rotate. It is expressible: `shl` = 0x17 and `shr` = 0x18 both exist in
+`src/assembler.zig` and dispatch in `src/decoder.zig`.
+
+### Measured, by running the repo's own decoders — and a warning about llvm-mc
+
+The other three programs were real and were run through this repository's decoders via a
+throwaway driver in `/tmp` (not in-tree): **x86-64 454 retired, RISC-V 776, AArch64 710.**
+The per-ISA cost difference is genuine and not an artifact:
+
+- x86-64 does the rotate in one `imulq $8`;
+- RISC-V pays `slli`/`srli`/`or`;
+- AArch64 can only build it from `add w,w,w,lsl#k` / `add w,w,w,lsr#k`, because a **bare
+  `LSR` immediate is not in this repository's AArch64 subset** (`isa_aarch64.zig` has the
+  shift only as a field of ADD/SUB, at 0x8B/0xCB).
+
+**This kernel would make CLS64 lose, which is the expected outcome** and must be declared
+`.expected_loss`, with the measurement deciding any surprise.
+
+**Two traps the driver caught, both worth knowing before writing another ISA program:**
+
+1. An AArch64 `LSR` immediate that `llvm-mc` accepts but this repository's decoder does
+   not — **`llvm-mc` is an oracle for the three REAL ISAs only; it does not validate
+   against this repo's subsets.** Every word must be checked against the decoders here.
+2. A RISC-V branch whose label this repository's assembler resolved as `j.eq .+8`. The
+   AArch64 and x86-64 few-shift claims above were similarly confirmed by running, not read.
+
+### What went wrong procedurally, stated plainly
+
+Both attempts spent their whole budget on **generation plumbing** — three separate scratch
+toolchains — and neither reached the point of measuring. The draft that was thrown away was
+105 lines of a kernel whose four programs had never been run together.
+
+**Both the rejected-draft and the verified-shape notes above are deliberately kept.** The
+first attempt's kernel (a data-driven table walk, 148 instructions, classifier base 616,
+verified slot-by-slot against this repository's own disassembler) is described in the
+session transcript but not reproduced here; its design was sound and it failed for a
+different reason — it needed a "dead destination register" primitive that does not exist
+across the four ISAs (x86-64's decoder has **no shift handler at all** and falls to
+`UnknownOpcode`; AArch64 has no standalone LSL). **That is a dead end and should not be
+retried.**
+
+### What closing it needs
+
+The next attempt should: pick a kernel with **no calibration or fixed-point argument** (a
+memory copy, a bit-manipulation kernel, a straightforward nested-loop reduction); write
+**only** instructions confirmed against `src/isa_*.zig`, never `llvm-mc` alone; run all four
+through the decoders **before** measuring; and declare `.expected_loss`. Budget the kernel
+first and the generator second — or better, hand-write the four programs and skip the
+generator, which is what ate both attempts.
