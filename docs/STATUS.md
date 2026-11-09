@@ -2517,3 +2517,89 @@ name `r8`–`r15` in those families, which is why both defects survived. Reprodu
 **What may NOT be said:** that the x86-64 decoder mishandles REX generally. The ModRM path
 was fixed under F38 and is correct throughout; these are the three opcode-embedded families,
 where the same normalised bit means something the shift-based paths do not express.
+
+---
+
+## F45: a bit-manipulation kernel cannot be written for all four ISAs in this set
+
+> **RESOLVED — the blocker was removed by implementing the missing decoder feature, and
+> the requested kernel now exists as `xor_reduce`.** AArch64 in this repository now
+> implements the logical shifted-register group (AND/ORR/EOR/ANDS, `0x0A`/`0x2A`/`0x4A`/
+> `0x6A`), verified byte-for-byte against LLVM's own encodings. The original entry is kept
+> below because the analysis of *why* the shape was blocked is the part worth keeping.
+>
+> **The fix is small and the reasoning is the entry's own conclusion:** "adding them is a
+> legitimate way to unblock this shape, and is the honest fix if the shape is wanted."
+> `src/isa_aarch64.zig` gained a `logicalReg` arm beside the existing `addSubReg`, sharing
+> its shift-field handling. 32-bit (`w`) forms are refused rather than treated as 64-bit,
+> matching what `addSubReg` already does and for the same reason.
+>
+> **Verified by running:** `and x0,x1,x2` → `0x0F`, `orr` → `0xFF`, `eor` → `0xF0` on
+> `0xFF`/`0x0F` inputs; the encoder reproduces LLVM's `0x8A020020`/`0xAA020020`/`0xCA020020`
+> byte-for-byte. **Load-bearing, proven by mutation in a throwaway copy:** removing the
+> logical arm makes `xor_reduce` fail with `AArch64 A64 is NOT equivalent` — so the kernel
+> genuinely depends on the instruction that was added.
+
+**Status at the time: recorded. This BLOCKED one of the four example shapes the session
+objective names.** No code changed then.
+
+The objective asks for "bit-manipulation with a non-identity result" as an example kernel.
+That shape is **not expressible** across the four ISA subsets this repository implements,
+and the reason is not CLS64:
+
+| ISA | Bitwise operations available |
+|---|---|
+| **CLS64** | `and` (0x14), `or` (0x15), `xor` (0x16), `shl` (0x17), `shr` (0x18) — **all five** |
+| **RISC-V RV64I** | `and`, `or`, `xor`, `sll`, `srl`, `sra` — **all present** |
+| **x86-64** | `xor r/m,r` (0x31) **and `and r/m, imm8` (0x83 /4)**. No register-form `and` (0x21), no `or` (0x09), no shifts (0xD1/0xD3) |
+| **AArch64 A64** | **NONE.** `and`, `orr`, `eor`, `lsl` (UBFM) and `lslv` are all `UnknownOpcode` |
+
+**Verified by running, not by reading.** Each instruction was encoded and fed to the
+decoder that this repository would execute:
+
+```
+and x0,x0,x1 (0x8A) (0x8A010000): REJECTED UnknownOpcode
+orr x0,x0,x1 (0xAA) (0xAA010000): REJECTED UnknownOpcode
+eor x0,x0,x1 (0xCA) (0xCA010000): REJECTED UnknownOpcode
+lsl x5,x5,#62 (UBFM) (0xD34204A5): REJECTED UnknownOpcode
+lslv x0,x0,x1 (0x9AC) (0x9AC12000): REJECTED UnknownOpcode
+```
+
+x86-64, checked the same way:
+
+```
+xorq %rcx,%rax (0x31): accepted
+andq %rcx,%rax (0x21): REJECTED UnknownOpcode
+orq  %rcx,%rax (0x09): REJECTED UnknownOpcode
+shlq $1,%rax   (0xD1): REJECTED UnknownOpcode
+andq $15,%rax  (0x83 /4): accepted   -> 0xFF & 15 = 0xF, correct
+```
+
+**One correction to this entry's own first draft, kept rather than overwritten:** it claimed
+x86-64 had "`xor` only" and "no `and` that keeps its result". Running it disproved that —
+`andq $15, %rax` is implemented and computes correctly. The draft had inferred x86's support
+from the flag-only `TEST` (0x85) and missed the `0x83` immediate group, which is the lesson
+this file keeps recording: **a table of what a decoder supports must be produced by feeding
+it instructions, not by reading its dispatch.**
+
+The AArch64 subset is `B.cond`/`B`, `ADD`/`SUB` (immediate and shifted-register), `CMP`,
+`MADD`/`MSUB`, `LDR`/`STR`, `MOVZ`/`MOVN`, `RET`, `NOP` — the dispatch at
+`src/isa_aarch64.zig:103-131` lists exactly those, and nothing bitwise appears.
+
+### Why this is worth recording rather than working around
+
+The four programs of an example must compute **the same thing**, and the whole suite exists
+to compare them. Writing "bit manipulation" for AArch64 by chaining `add x, x, x` (a left
+shift by one) would produce a *different program shape* from the others — which is exactly
+the "not cherry-picked, written idiomatically per ISA" property the suite is built to
+preserve. A kernel where three ISAs use real bitwise instructions and the fourth multiplies
+by two is not a comparison of bit manipulation; it is a comparison of one ISA's workaround.
+
+**This is a property of the SUBSETS, not of the ISAs.** Real AArch64 has `AND`/`ORR`/`EOR`
+in the same 0x8A/0xAA/0xCA space the decoder rejects, and real x86-64 has `and`/`or`/`shl`.
+The gap is that this repository's three hand-written decoders implement only the instructions
+their kernels needed so far. **Adding them is a legitimate way to unblock this shape**, and
+is the honest fix if the shape is wanted — it is a decoder feature, not a workaround.
+
+**What may NOT be said:** that AArch64 or x86-64 lack bitwise operations. They do not; this
+repository's decoders do not implement them yet.

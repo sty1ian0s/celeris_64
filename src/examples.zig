@@ -496,6 +496,77 @@ pub const examples = [_]Example{
     },
 
     // ====================================================================
+    // xor_reduce
+    // ====================================================================
+    // WHY IT IS HERE: this is the BIT-MANIPULATION kernel, and it is inherently bitwise
+    //     rather than arithmetic wearing a mask. XOR is not expressible with add/sub, every
+    //     output bit depends on every element, and the result is non-identity (a single
+    //     flipped bit anywhere changes the answer). The other kernels' arithmetic would
+    //     all survive a mistake that preserves a sum; this one would not.
+    //
+    //     It also exercises a REAL GAP that was closed to build it. When this kernel was
+    //     written, AArch64 in this repository had NO bitwise operation at all - `and`,
+    //     `orr`, `eor`, `lsl` were all `UnknownOpcode` - so the shape could not be written
+    //     for all four ISAs. That is recorded as F45, and the fix was to implement the
+    //     logical shifted-register group (0x0A/0x2A/0x4A/0x6A) in
+    //     `src/isa_aarch64.zig`, verified byte-for-byte against LLVM's own encodings.
+    //     The `eor` in the AArch64 program below is that instruction.
+    //
+    //     WHY CLS64 IS EXPECTED TO LOSE: the body is one `xor` on every ISA, so the only
+    //     difference is loop overhead - and CLS64 pays an unconditional `jump` per
+    //     iteration where the other three fall through. It is the same story as
+    //     `loop_sum`, with a body that does real work.
+    .{
+        .name = "xor_reduce",
+        .what = "XOR-reduce 256 u64 words: a bitwise fold whose every output bit depends on every element",
+        .expectation = .expected_loss,
+        .data = word_data,
+        .cls64 =
+        \\# XOR-reduce 256 u64 words.
+        \\#
+        \\# `xor` is the point: no combination of add/sub produces this, and a single
+        \\# changed bit in any element changes the answer. The loop overhead is the rest.
+        \\mov R1, 8192        # cursor
+        \\mov R2, 0           # accumulator
+        \\mov R3, 0           # bytes consumed
+        \\mov R4, 2048        # total bytes
+        \\mov R5, 8448        # result slot
+        \\loop:
+        \\compare R9, R3, R4
+        \\branch R9, [EQUAL], done
+        \\load R7, [R1+0]
+        \\xor R2, R2, R7
+        \\add R1, R1, 8
+        \\add R3, R3, 8
+        \\jump loop
+        \\done:
+        \\store R2, [R5+0]
+        \\halt
+        ,
+        .riscv = &.{
+            0x00002537, 0x00000593, 0x00000613, 0x00100693, 0x00B69693, 0x00002737,
+            0x1007071B, 0x00D65C63, 0x00053783, 0x00F5C5B3, 0x00850513, 0x00860613,
+            0xFEDFF06F, 0x00B73023, 0x05D00893, 0x00000073,
+        },
+        // `eor x1, x1, x5` is 0xCA050021 - the logical shifted-register group added
+        // under F45. Before that change this word was `UnknownOpcode` and this kernel
+        // could not be written for four ISAs at all.
+        .aarch64 = &.{
+            0xD2840000, 0xD2800001, 0xD2800002, 0xD2810003, 0xD2842004, 0xEB03005F,
+            0x540000C0, 0xF9400005, 0xCA050021, 0x91002000, 0x91002042, 0x17FFFFFA,
+            0xF9000081, 0x14000000,
+        },
+        .x86 = &.{
+            0x48, 0xC7, 0xC0, 0x00, 0x20, 0x00, 0x00, 0x48, 0x31, 0xC9, 0x48, 0x31,
+            0xF6, 0x48, 0xC7, 0xC2, 0x00, 0x08, 0x00, 0x00, 0x48, 0xC7, 0xC7, 0x00,
+            0x21, 0x00, 0x00, 0x48, 0x39, 0xD6, 0x74, 0x10, 0x4C, 0x8B, 0x00, 0x4C,
+            0x31, 0xC1, 0x48, 0x83, 0xC0, 0x08, 0x48, 0x83, 0xC6, 0x08, 0xEB, 0xEB,
+            0x48, 0x89, 0x0F, 0xEB, 0xFE,
+        },
+        .answer = 12023219831548197893,
+    },
+
+    // ====================================================================
     // loop_sum
     // ====================================================================
     // WHY IT IS HERE, AND WHY CLS64 IS EXPECTED TO LOSE MOST BADLY HERE: with a body of
@@ -961,6 +1032,15 @@ pub fn answerFor(name: []const u8) u64 {
     if (std.mem.eql(u8, name, "byte_sum")) {
         var acc: u64 = 0;
         for (byte_data) |b| acc += b;
+        return acc;
+    }
+    if (std.mem.eql(u8, name, "xor_reduce")) {
+        // The XOR fold. Every bit of this depends on every element, and no combination
+        // of add/sub produces it, which is what makes it a bitwise test rather than an
+        // arithmetic one wearing a mask.
+        var acc: u64 = 0;
+        var i: usize = 0;
+        while (i < word_data.len) : (i += 8) acc ^= std.mem.readInt(u64, word_data[i..][0..8], .little);
         return acc;
     }
     if (std.mem.eql(u8, name, "band_count")) {

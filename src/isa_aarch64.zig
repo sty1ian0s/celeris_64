@@ -109,6 +109,14 @@ pub const Cpu = struct {
         // Add/subtract (shifted register): ADD/SUB/CMP. 0x8B / 0xCB / 0xEB.
         if ((insn & 0x1F200000) == 0x0B000000) return self.addSubReg(insn);
 
+        // Logical (shifted register): AND/ORR/EOR/ANDS. 0x0A / 0x2A / 0x4A / 0x6A
+        // with the sf bit for 64-bit. Added to unblock the bit-manipulation example
+        // shape — see F45, which records that its absence was the ONLY thing stopping
+        // that kernel, since CLS64, RISC-V and x86-64 all have bitwise operations.
+        //
+        // The opc field is bits [30:29]: 00 AND, 01 ORR, 10 EOR, 11 ANDS.
+        if ((insn & 0x1F200000) == 0x0A000000) return self.logicalReg(insn);
+
         // Data-processing (3 source): MADD/MSUB. The mask must pin bit 15, which
         // separates the 3-source group from the shifted-register group above —
         // MADD is 0x9B, not 0x8B, and its bits [28:24] are 11011. `mul Rd, Rn,
@@ -183,6 +191,49 @@ pub const Cpu = struct {
 
         if (s == 1) self.setFlags(a, bb, masked, op == 1, sf == 1);
         self.write(rd, masked);
+    }
+
+    /// Logical (shifted register): `AND`/`ORR`/`EOR`/`ANDS` — `Rd = Rn OP (Rm shift k)`.
+    ///
+    /// Added under F45, which recorded that a bit-manipulation example kernel could not
+    /// be written for all four ISAs because **this subset had no bitwise operation at
+    /// all**, while CLS64, RISC-V and x86-64 all did. The instruction this exists for is
+    /// `and`, so the 64-bit forms are implemented and the 32-bit ones are refused rather
+    /// than silently treated as 64-bit — the same choice `addSubReg` makes, and for the
+    /// same reason: a `w` operation that wrote 64 bits would be wrong in a way nothing
+    /// downstream could see.
+    fn logicalReg(self: *Cpu, insn: u32) !void {
+        const sf = (insn >> 31) & 1;
+        const opc: u2 = @truncate((insn >> 29) & 3); // 0 AND, 1 ORR, 2 EOR, 3 ANDS
+        const shift_type: u2 = @truncate((insn >> 22) & 3);
+        const n = (insn >> 21) & 1; // bit 21 must be 0 here; 1 means the N=1 group
+        if (n != 0) return error.UnknownOpcode;
+        if (sf == 0) return error.UnknownOpcode; // 32-bit form not implemented
+
+        const shift_amt: u6 = @intCast((insn >> 10) & 0x3F);
+        const rm: u5 = @truncate(insn >> 16);
+        const rn: u5 = @truncate(insn >> 5);
+        const rd: u5 = @truncate(insn);
+
+        var b = self.read(rm);
+        switch (shift_type) {
+            0 => b = if (shift_amt == 0) b else b << @intCast(shift_amt), // LSL
+            1 => b >>= @intCast(shift_amt), // LSR
+            2 => b = @bitCast(@as(i64, @bitCast(b)) >> @intCast(shift_amt)), // ASR
+            else => return error.UnsupportedShift, // ROR
+        }
+
+        const a = self.read(rn);
+        const res: u64 = switch (opc) {
+            0 => a & b,
+            1 => a | b,
+            2 => a ^ b,
+            // ANDS: AND with flags set. Its result is discarded in AArch64's `tst`
+            // spelling, but the encoding's Rd is still written, so write it.
+            3 => a & b,
+        };
+        if (opc == 3) self.setFlags(a, b, res, false, true);
+        self.write(rd, res);
     }
 
     /// MADD/MSUB: `Rd = Ra + (Rn * Rm)` or `Rd = Ra - (Rn * Rm)`.
@@ -387,6 +438,13 @@ pub fn add(rd: u5, rn: u5, rm: u5) u32 {
 pub fn sub(rd: u5, rn: u5, rm: u5) u32 {
     return 0xCB000000 | (@as(u32, rm) << 16) | (@as(u32, rn) << 5) | rd;
 }
+
+/// Logical (shifted register), 64-bit: `and`/`orr`/`eor`/`ands Rd, Rn, Rm`.
+/// The opc field is bits [30:29], so the bases are 0x8A / 0xAA / 0xCA / 0xEA.
+/// Added under F45 so a bit-manipulation kernel can be written for all four ISAs.
+pub fn logical(opc: u2, rd: u5, rn: u5, rm: u5) u32 {
+    return 0x8A000000 | (@as(u32, opc) << 29) | (@as(u32, rm) << 16) | (@as(u32, rn) << 5) | rd;
+}
 pub fn ldr(rt: u5, rn: u5, off: u12) u32 {
     return 0xF9400000 | (@as(u32, off) << 10) | (@as(u32, rn) << 5) | rt;
 }
@@ -549,6 +607,11 @@ test "ORACLE: my A64 encoder reproduces LLVM's byte-for-byte" {
         .{ .name = "str x0,[x1]", .mine = str(0, 1, 0), .llvm = 0xF9000020 },
         .{ .name = "add x0,x0,#5", .mine = addImm(0, 0, 5), .llvm = 0x91001400 },
         .{ .name = "cmp x0,x1", .mine = cmp(0, 1), .llvm = 0xEB01001F },
+        // F45: the logical group. LLVM's bytes for `and/orr/eor x0, x1, x2` are
+        // 0x8A020020 / 0xAA020020 / 0xCA020020, quoted from `llvm-mc -show-encoding`.
+        .{ .name = "and x0,x1,x2", .mine = logical(0, 0, 1, 2), .llvm = 0x8A020020 },
+        .{ .name = "orr x0,x1,x2", .mine = logical(1, 0, 1, 2), .llvm = 0xAA020020 },
+        .{ .name = "eor x0,x1,x2", .mine = logical(2, 0, 1, 2), .llvm = 0xCA020020 },
         .{ .name = "b.ne 16", .mine = bCond(0x1, 16), .llvm = 0x54000081 },
         .{ .name = "b.eq -8", .mine = bCond(0x0, -8), .llvm = 0x54FFFFC0 },
         .{ .name = "ret", .mine = ret(), .llvm = 0xD65F03C0 },
