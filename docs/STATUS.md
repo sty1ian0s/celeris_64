@@ -1773,3 +1773,116 @@ stale artifact reads exactly like a real result.** `git status` was clean for
 `src/vm.zig` and the source was correct, so no file diff would have revealed it.
 Rebuild before believing a CLI observation, especially when that observation is
 being used as evidence in a document.
+
+---
+
+## F36 CLOSED (v1.18, Amendment 1.18) — eleven of thirteen accelerators execute
+
+The finding offered no route out except a contract change, because every available
+implementation would have invented a convention. **Amendment 1.18 is that change**,
+and it stayed inside the existing four fields (`rs2`, `rs3`, `reserved`, `count`) —
+no bit layout moved and no field was added, which is what kept F36 a contract gap
+rather than an encoding gap.
+
+**Result: 11 of 13 execute. 2 remain refused**, and the two refusals are now
+properties of the *operations*, not of a missing constant:
+
+- **`matrix.mul` (0x62)** needs three addresses and two orders — five inputs for four
+  fields. Reading an order from `count`, deriving the product's address from an
+  input's extent, and aliasing one matrix's header into another's data were each
+  considered and rejected. The honest fix is a second opcode, which an amendment that
+  does not change the encoding may not add.
+- **`codec.decompress` (0x81)** needs an `out.len` bound. Reusing `compress`'s 256-byte
+  workspace would silently reject valid inputs whose decompressed form exceeded 256
+  bytes — a narrowed domain, which is worse than a refusal because it looks like it
+  works.
+
+The load-bearing decisions are recorded in the version-history row for 1.18, including
+where each matrix dimension comes from and why `matrix.identity`'s old table row was
+unreachable from source (`.sources = 0` could not fill `rs1`, where its order lives,
+and `.takes_count = true` invited the one spelling the VM rejects).
+
+**§3.6 line 490 is retracted in place**, not deleted: the struck sentence, the
+retraction and the current rule all sit at the line where the old rule lived, so a
+reader who lands there first is not misled. Tested directly — with `rd` pre-loaded to
+8 and no `count`, `codec.fnv1a` refuses and leaves `rd` at 8, where a count-reading
+implementation would have hashed 8 bytes and succeeded.
+
+**A false premise in the amendment's own first draft, caught in review and kept as a
+retraction.** Rule C originally said the `codec.compress` workspace sits in "the 64 KiB
+memory image every execution entry point allocates". That is false: `crossarch.zig`
+allocates 4 672 bytes and `examples.zig` 20 480, and `Vm.init` accepts any slice, so
+65 536 is a CLI convention rather than a machine property. The rule now states the
+precondition, refuses below it with a sentence naming the required address, the
+required length and the actual image length, touches no byte, and is proven in both
+directions.
+
+**What may and may not be said.**
+
+- **May be said:** eleven §3.6 operations execute with the results their models
+  compute, verified end to end through the CLI — `codec.fnv1a`'s value checked against
+  an FNV-1a computed independently in Python, `matrix.identity` shown writing a real
+  2×2 matrix into memory with sentinels around the block so a no-op cannot pass.
+- **May be said:** the change is encoding-neutral. The round-trip fuzzer is unchanged
+  at `checked=11839 identical=11839`.
+- **May not be said:** that the accelerators are "done". Two refuse by design and need
+  a second opcode or a wider operand field.
+- **Not independently verified:** CLS64 has no LLVM backend, so every word quoted for
+  these operations is checked against this repository's own decoder and encoder pair.
+  That is self-consistency, not an outside oracle.
+
+---
+
+## F38: REX.R and REX.B selected the wrong register for r8–r15 (x86-64)
+
+**Found** by the agent writing the example suite, which worked around it by keeping
+its hand-written x86-64 programs in r0–r7. **Fixed** in `a5be79d`.
+
+The REX prefix bits were stored unnormalised: `rex_r = @truncate(b & 0x04)` yields 4,
+not 1, so `rex_r << 3` is 32 and truncates to 0 in a `u4`. Both REX.R (the ModRM.reg
+extension) and REX.B (the r/m extension) therefore resolved to their low counterparts,
+silently, for every instruction naming an extended register.
+
+Reproduced before the fix: `4C 8B 00`, which `llvm-mc` encodes for
+`movq (%rax), %r8`, loaded into **RAX** and left R8 at zero. After the fix R8 receives
+the value and RAX is untouched. Both bits are normalised to their own position now.
+
+**Why no test caught it, which is the part worth keeping:** every test in the file used
+r0–r7 in its hand-written encodings, so the entire r8–r15 space was unexercised. Checked
+rather than assumed: in the file as it stood before the fix, the string `r8` occurs
+exactly twice, and both are in one comment naming the `MOV r/m8, r8` opcode — no test
+word ever named an extended register. The ORACLE tests do compare against LLVM's bytes,
+but they check the *length and decoding of words LLVM produced*, and none of those used
+one either. A whole register file was untested while the suite stayed green.
+
+This is the **F8 shape** once more: here it is not a rule enforced in one layer and
+absent in another, but a *wrong* rule that both this repository's encoder helpers and
+its decoder shared, so every self-consistency check agreed. `llvm-mc` was the only
+thing in the repository that disagreed, and only because a new program happened to be
+written for r8. The regression test uses LLVM's own encodings for a load into R8 and a
+store from it, and was confirmed load-bearing by reverting the normalisation in a
+throwaway copy.
+
+---
+
+## F39: the example suite's verdict logic called a real loss "WRONG"
+
+**Found** by the Lead while reviewing the first run of the example suite. **Fixed**
+in `c414be5`.
+
+The verdict compared CLS64's retired count against the other three ISAs and tested a
+declared *loss* as `most` — CLS64 retiring more than **every** other ISA. That is a
+strictly stronger claim than losing. `fused_stream_add` retires 1802 against RISC-V's
+1801 and x86-64's 1799, so CLS64 genuinely loses both comparisons, while AArch64's
+2057 is worse than CLS64 — so `most` was false and the report printed **WRONG**,
+presenting a confirmed loss as a falsified prediction.
+
+"Win" is now "beats all three" and "loss" is "beaten by at least one". The two are not
+complements, which is exactly why the old encoding of `loss` as `most` could not
+express the four-way case, and the source note says so.
+
+**Why this matters beyond the one row:** the verdict column is the suite's own
+falsification machinery. A verdict that reports a confirmed expectation as failed is
+the mirror of the defect this whole suite exists to avoid — and it was one line, in
+the reporting layer, invisible to every equivalence test because the *programs* were
+all correct. The equivalence checks were sound; the summary was not.
