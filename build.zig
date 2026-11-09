@@ -224,6 +224,26 @@ pub fn build(b: *std.Build) void {
     const crossarch_run = b.addRunArtifact(crossarch_exe);
     b.step("crossarch", "Compare the workload across four ISAs (no timing claims)").dependOn(&crossarch_run.step);
 
+    // Cross-architecture EXAMPLE SUITE: six kernels, four ISAs, each verified to
+    // compute the same thing before its row is printed. Reports retired
+    // instructions and encoded bytes; reports no timing quantity, by design.
+    const examples_mod = b.createModule(.{
+        .root_source_file = b.path("src/examples.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const examples_exe = b.addExecutable(.{
+        .name = "examples-report",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/examples-report.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "examples", .module = examples_mod }},
+        }),
+    });
+    const examples_run = b.addRunArtifact(examples_exe);
+    b.step("examples", "Run the cross-architecture example suite (no timing claims)").dependOn(&examples_run.step);
+
     const test_step = b.step("test", "Run the Celeris-64 test suite");
     test_step.dependOn(&b.addRunArtifact(vm_tests).step);
     test_step.dependOn(&b.addRunArtifact(suite_tests).step);
@@ -243,6 +263,7 @@ pub fn build(b: *std.Build) void {
     const isa_roots = [_][]const u8{
         "src/isaharness.zig",
         "src/crossarch.zig",
+        "src/examples.zig",
         "src/isa_riscv.zig",
         "src/isa_aarch64.zig",
         "src/isa_x86_64.zig",
