@@ -8,9 +8,9 @@ running something; claims that were not observed are marked as such.
 ## 1. Repository state
 
 ```
-HEAD         b081f6f  docs(status): F41 — correct the shift semantics
-remote       origin/main, IN SYNC as of b081f6f (pushed)
-working tree CLEAN (at b081f6f)
+HEAD         433d950  feat(examples): the eighth kernel lands as `signed_max`, closing F41
+remote       origin/main, IN SYNC after the push below (was b081f6f)
+working tree CLEAN (at 433d950)
 ```
 
 Four commits landed this session, in this order:
@@ -21,15 +21,17 @@ Four commits landed this session, in this order:
 | `f3826f2` | `fix(rtl)`: the §3.6 recognition table matches the contract (**closes F40**) |
 | `69dbdca` | `docs(status)`: **F41** — the eighth example kernel was attempted twice and landed neither time |
 | `b081f6f` | `docs(status)`: F41 — correct the shift semantics |
+| `cfe6a9b` | `docs(handoff)`: third-session handoff |
+| `433d950` | `feat(examples)`: **the eighth kernel lands as `signed_max` (closes F41)** |
 
-### Gates, all run on a cold cache at `b081f6f`
+### Gates, all run on a cold cache at `433d950`
 
 ```sh
 rm -rf .zig-cache && ~/.local/zig/zig build test --summary all
   -> Build Summary: 53/53 steps succeeded; 1016/1016 tests passed   exit 0
 
 bash tests/mulout_e2e.sh           -> 6/6 checks passed        exit 0
-~/.local/zig/zig build examples    -> 64 "simulated" lines, 7 kernels x 4 ISAs
+~/.local/zig/zig build examples    -> 69 "simulated" lines, 8 kernels x 4 ISAs
 ~/.local/zig/zig build audit       -> 9/9 enforcement points, all 9 rejected when set
 ~/.local/zig/zig build live-check  -> all 232 recorded facts still reproduce
 ~/.local/zig/zig build crossarch   -> 8 rows, no !! warnings
@@ -39,7 +41,7 @@ Verilator core_tb                  -> 159/159 checks, exit 0
 The test count moved 1004 -> 1016. The `failed command:` lines that `zig build test
 --summary all` prints are **stderr from tests that legitimately exercise negative paths**
 (the analyzer's warnings, the examples suite's deliberate NOT-equivalent control at
-`src/examples.zig:1232`, the fuzzer's coverage line). They are not failures: the summary
+`src/examples.zig:1333`, the fuzzer's coverage line). They are not failures: the summary
 said 1016/1016 and exit 0, and there were **zero** `error:` lines. Confirmed by reading
 the log, not waved off.
 
@@ -131,15 +133,48 @@ decoder was the first). **Both were found by asking what a passing check actuall
 
 ---
 
-## 4. F41 — the example breadth item is NOT delivered, and that is an honest result
+## 4. F41 — the example breadth item is DELIVERED (third attempt), and how
 
-`src/examples.zig` is **byte-identical to `b081f6f`**. The suite still passes: 7 kernels x
-4 ISAs, `zig build examples` exit 0. **No eighth kernel landed.** Two attempts, both
-stopped by a teammate, **both correctly**: each wrote a kernel whose CLS64 program did not
-compute what the other three did, caught it against the reference, and reverted rather than
-shipping it.
+```
+signed_max  Celeris-64 CLS64   2306 simulated   18448   loss   9222717111107562960
+signed_max  RISC-V RV64I       1550 simulated    6200   loss   9222717111107562960
+signed_max  AArch64 A64        2058 simulated    8232   loss   9222717111107562960
+signed_max  x86-64             2058 simulated    5931   loss   9222717111107562960
+```
 
-The full findings are in `docs/STATUS.md` F41 and on shared **task-2**. The essentials:
+**8 kernels x 4 ISAs, all byte-equivalent, `zig build examples` exit 0.** The kernel is the
+signed maximum of 256 `u64` words — a comparison-shaped reduction, no calibration and no
+fixed-point argument, the four programs **hand-written** rather than generated.
+
+The two earlier attempts failed and **both stopped correctly** — each wrote a kernel whose
+CLS64 program did not compute what the other three did, caught it against the reference,
+and reverted rather than shipping it. **What made the third work is the rule they
+established, so keep it:** *verify every instruction against `src/isa_*.zig` before the
+first measurement.* That caught three defects llvm-mc accepts happily and no count would
+reveal:
+
+1. **RISC-V `ecall` needs `a7` (x17), not any register.** `li a5, 93; ecall` assembles,
+   computes the RIGHT answer, then **faults at the halt** — `isa_riscv.zig` requires
+   `read(17) == 93`.
+2. **AArch64 has no register-form `mov` in this subset.** `mov x3, x5` is ORR (`0xAA...`);
+   the dispatch covers ADD/SUB/CMP shifted-register (`0x8B`/`0xCB`/`0xEB`) but not ORR, and
+   there is no `csel`. Use `add x3, x5, #0` (`0x910000A3`).
+3. **x86-64 terminates on a SELF-branch.** Jumping back to an earlier label runs to the
+   2,000,000-step limit — *having already stored the correct answer*, so an answer-only
+   check passes a program that never halts. End with `jmp .` (`0xEB 0xFE`).
+
+**All three are one class:** assembled by llvm-mc, correct bytes at `result_addr`, wrong in
+a way the count does not show. **`llvm-mc` is an oracle for the three REAL ISAs only** — it
+does not validate against this repository's subsets.
+
+**Load-bearing, proven by mutation in a throwaway copy:** changing CLS64's `[GREATER]` to
+`[UNSIGNED_GREATER]` makes the suite report `NOT equivalent` at address 8448 and the
+examples build fail. Signed and unsigned genuinely differ here (`0x7ffdac59377badd0` vs
+`0xffb598a8e9273fd6`).
+
+**CLS64 loses, as declared.** Do not tune the programs to change it.
+
+### The findings from the two failed attempts, kept because they are still useful
 
 - **CLS64 needs MORE instructions than the other three for the same operation, and cutting
   them does not make the program faster — it makes it WRONG, silently**, with no assembler
@@ -196,8 +231,14 @@ test really exercises the shipped programs rather than only fixtures.
 
 ## 6. What remains
 
-1. **The example suite's eighth kernel (F41).** Not blocked by any defect; blocked by
-   implementation cost. Follow §4 above and do not restart from zero.
+1. **More example kernels** — the eighth (`signed_max`) is delivered; see §4. The suite now
+   runs 8 kernels x 4 ISAs. Further breadth is welcome, and §4's rule applies to every one
+   of them: **verify each instruction against `src/isa_*.zig` before measuring**, hand-write
+   the programs rather than generating them, and declare `.expected_loss` where CLS64 loses
+   (which is everywhere so far). Candidate shapes not yet covered: a branch-heavy control-flow
+   kernel, a memory copy, a bit-manipulation kernel with a non-identity result, a
+   struct-of-arrays traversal. **Do not retry** the data-driven table walk (a dead end — see
+   F41: it needs a "dead destination register" primitive that no four-ISA set provides).
 2. **More analyzers** — breadth, not mechanism. The module header lists what is unsound and
    why; read it before proposing anything.
 3. **The accelerators.** 11 of 13 execute. `matrix.mul` (0x62) and `codec.decompress`
