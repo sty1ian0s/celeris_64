@@ -1,6 +1,6 @@
 # Celeris-64 (CLS64) Instruction Encoding Contract
 
-Document Version: 1.17
+Document Version: 1.18
 Status: **Normative** — all simulator, assembler and disassembler code MUST match this
 document. If code and this document disagree, one of them is a bug.
 
@@ -487,9 +487,27 @@ Operand field layout for all accelerator ops:
 - `rs3[43:40]` — third source register (destination-staging or modulus). `0` unused.
 - `reserved[39:32]` — must be zero. A non-zero value is a diagnostic error (§7), so
   the space stays available for future operands without a flag day.
-- `count[31:0]` — element or byte count, unsigned. `0` means "derive the count from
+- `count[31:0]` — element or byte count, unsigned. ~~`0` means "derive the count from
   the destination register", which is the form the assembler emits when no count is
-  written.
+  written.~~
+
+  > **RETRACTED IN PLACE by Amendment 1.18 (normative).** The struck sentence above was
+  > normative from 1.1 through 1.17 and is **no longer in force for any operation**. It
+  > is kept rather than deleted so a reader who saw it in an earlier revision can find
+  > out what happened to it.
+  >
+  > It never said what the destination register *holds*, whether that value is a byte
+  > count or an element count, or what `rd = R0` means — and `R0` is a real writable
+  > register, so the hardwired-zero rule does not settle it. It also named one register
+  > as both an input length and the operation's result.
+  >
+  > **Current rule (Amendment 1.18, Rule D):** `count` is an explicit length whose
+  > **unit is stated per operation** in Rule E's table — complex elements for `fft.*`,
+  > u64 elements for `fft.ntt`, bytes for `codec.*`, elements per stream for
+  > `matrix.transform`. **`count = 0` means "no count", and is a diagnostic error for
+  > every operation that needs a length.** `matrix.identity` is the one row where `0` is
+  > a value rather than a missing length, and it takes its order from `rs1`, not from
+  > `count`. See Rule D and Rule E below for the full statement.
 
 Each operation names its operands positionally, exactly as the model signature reads:
 
@@ -516,6 +534,203 @@ and must not be silently reinterpreted as a neighbouring operation.
 Behaviour of these operations in the simulator is a **software model** and must be
 labelled as such — see §8. The RTL in `rtl/` implements the same encodings; that shared
 encoding is what makes cross-checking the two meaningful.
+
+**Amendment 1.18 (normative), part 1: operand-address arithmetic.**
+
+Amendment 1.1 above fixes *which field holds which operand*. It does not fix what those
+operands *mean* — it never says which register holds an address, where a matrix's order
+comes from, where an output buffer lives, or what unit `count` is in. The result was
+recorded as **F36** (`docs/STATUS.md`): the table names `matrix.determinant(m)` but the
+word carries no dimension, and it names `codec.compress(input, out)` but the word carries
+no output address. This part of the amendment supplies the missing arithmetic, from the
+field set that already exists. **It does not widen the encoding.** No fifth field, no new
+bit, no change to the word layout of 1.1.
+
+**Rule A — every register operand is a VALUE, not an index, with exactly two exceptions.**
+
+An operand register named as an address in the per-operation rules below must hold the
+**address itself**, a full 64-bit unsigned byte offset into the flat memory model (§2.3).
+It is not a register index and it is not a pointer-to-a-pointer. It must be byte-aligned
+to the element width the operation reads or writes, which is stated per operation.
+
+The two exceptions are the two matrix-header forms, which deliberately read a register as
+**two 32-bit halves** rather than as one value:
+
+```
+ 63                32 31                 0
++--------------------+--------------------+
+|     rows (u32)    |     cols (u32)     |
++--------------------+--------------------+
+```
+
+A word-slice header register names a matrix's order without a memory fetch. The
+alternative — a 4×4 size field packed into `rs3` — is **rejected**: `rs3` is four bits, so
+it could express at most `n = 15`, and a 4-bit dimension is exactly the "plausible-looking
+fabricated number" F36 exists to prevent.
+
+**Rule B — matrix data is f64, and row-major.**
+
+Every `matrix.*` operand is a sequence of IEEE-754 `f64` (8 bytes, little-endian),
+**row-major** (`matrix.Mat.at` is `data[r * cols + c]`). So an `n × n` matrix occupies
+`8 · n · n` bytes, and an `m × k` times `k × n` product occupies `8 · m · n` bytes.
+
+**Rule C — `codec.compress`'s fixed workspace is part of the operation, and its
+availability is a CHECKED PRECONDITION, not an assumption.**
+
+`codec.compress` has no fitting output field either. Its output is written to a
+**256-byte scratch region at the fixed byte offset 65 280 (`0x0000_FF00`)**. Byte offset
+65 280 and the 256-byte length are **normative**. The output byte count is written into
+`rd` as a value, which is the one observable result. This offset is fixed rather than
+derived because there is no field left to derive it from, and a fixed *documented*
+workspace is reproducible — unlike a workspace inferred from whatever happens to follow
+the input in memory, which is the fudge this rule is written to forbid.
+
+**Correction (this amendment, retracted in place).** An earlier draft of this rule said the
+workspace "resides in the 64 KiB memory image every execution entry point allocates". That
+was **false**, and the Lead disproved it by reading the callers rather than the rule:
+
+| Caller | Memory image | Fits 65 280? |
+|---|---|---|
+| `src/main.zig` (the CLI) | 65 536 (`image_bytes = 1 << 16`) | yes |
+| `src/examples.zig:73` | 20 480 | **no** |
+| `src/crossarch.zig:42` | 4 672 | **no** |
+| accelerator tests (`vm.zig` `imageWithSize`) | program-sized | **no** |
+
+`Vm.init(image: []u8)` accepts **any** slice, so 65 536 was a convention of one CLI, not a
+property of the machine. The rule as drafted was out of bounds for every fixture except
+the CLI's, which would have made it untestable in the normal setup.
+
+**The rule is therefore scoped, not weakened.** The workspace exists only when the memory
+image is at least **65 536 bytes** (65 280 + 256). The precondition is *checked*, and the
+failure mode is a **diagnostic, never a panic and never a silent truncation**:
+
+- **Image ≥ 65 536 bytes:** `codec.compress` executes and writes its output to byte
+  65 280.
+- **Image < 65 536 bytes:** `codec.compress` **refuses** with a bounds sentence naming the
+  required address (65 280), the required length (256) and the actual image length, and
+  touching no byte. It does not clip the workspace, does not relocate it, and does not
+  write a short stream at the end of memory.
+
+This keeps the offset deterministic and specified while making its precondition explicit
+and testable in both directions. The alternative — lowering the offset so it fits today's
+fixtures — was **rejected**: it would bake a caller's `data_base` convention into the
+contract, which is exactly what Rule C exists to avoid, and it would silently corrupt any
+program whose data region reached the new offset. A caller that wants `codec.compress`
+must allocate an image large enough for the workspace; that requirement is now stated
+rather than assumed.
+
+`codec.decompress` **cannot** use this rule and stays refused; see Rule E.1.
+
+**Rule D — `count = 0` means "no count", and that is a diagnostic error.**
+
+§3.6's sentence *"`0` means 'derive the count from the destination register'"* is
+**superseded by this amendment for every operation.** Reading `rd` as an input count would
+impose a calling convention in which a program pre-loads its own *result* register with a
+length before every accelerator instruction — the same register named as both an input and
+an output. That is a plausible convention, not a stated one, and F36's whole point is that
+an unstated convention must not be implemented behind the user's back.
+
+The rule is therefore: **`count = 0` is a diagnostic error for every operation that needs
+a length.** There is exactly one exception, stated per row in Rule E: `matrix.identity`
+does not read `count` as its length at all — its order comes from `rs1` — so its `count`
+field is required to be **zero**, and a non-zero value is itself a diagnostic. Its order
+`rs1 = 0` is the empty matrix rather than an error. The rejected alternative was to keep
+the 1.1 sentence and let `rd` seed the count; it is rejected because it silently changes
+what `rd` means per call site, and because no unit could be attached to it without
+guessing.
+
+**Rule E — per operation.** Two conventions hold for every row below. First, an operand
+named as an address holds an **address value** (Rule A), and the row says which register
+that is. Second, redundant bits are normative: an operand a row does not use
+**must be zero in the word**, and a non-zero value is a diagnostic error, the same rule
+§3.6 already applies to `reserved[39:32]`. A redundant operand is rejected rather than
+ignored so no program can carry a meaning the operation does not have.
+
+| Opcode | Addresses | Shape | `count` | Unit | Status |
+|---|---|---|---|---|---|
+| `0x60` `matrix.det` | `rs1` **value** = matrix address; `rd` receives the determinant | `n` = `rs3`, `1..15` (u4, `0` = 16); 8·n·n bytes at `rs1` | must be `0` | — | **executes** |
+| `0x61` `matrix.invert` | `rs1` **value** = input address, `rd` **value** = output address | `n` = `rs2`, `1..15` (u4, `0` = 16) | must be `0` | — | **executes** |
+| `0x62` `matrix.mul` | not expressible | — | — | — | **refused**, Rule E.5 |
+| `0x63` `matrix.transform` | `rs1` **address value** (stream base) | 4×4 `m` = 16 `f64` at `rs2`; three streams of `count` `f64` each, consecutive from `rs1` (`count = 0` refused) | elements **per stream** | `f64` elements | **executes** |
+| `0x64` `matrix.identity` | `rd` **value** = output address | `n` = `rs1`, `0..16`; `n = 0` is the empty matrix and is **not** an error, because `0` is a meaningful order here rather than a missing length | must be `0` (the order is in `rs1`, not here) | `f64` elements per side | **executes** |
+| `0x70` `fft.forward` | `rd` **value**, `rs1` **value** | — | `N` = `count`, `0` refused; `N` must be a power of two | **complex elements** (16 bytes) | **executes** |
+| `0x71` `fft.inverse` | as `0x70` | — | as `0x70` | complex elements | **executes** |
+| `0x72` `fft.ntt` | `rs1` **value**; `rd` receives the element count | `rs2` and `rs3` must be `0` — see rule E.6 | `N` = `count`, `0` refused | **u64 elements** (8 bytes) | **executes** |
+| `0x73` `fft.ntt.inverse` | as `0x72` | as `0x72` | as `0x72` | u64 elements | **executes** |
+| `0x80` `codec.compress` | `rs1` **value** (input), `rd` **value** (compressed byte count) | output → the 256-byte workspace at byte 65 280 (Rule C) | `count` = input bytes, `0` refused | **bytes** | **executes** |
+| `0x81` `codec.decompress` | `rs1` **value** (input) | — | not expressible | — | **refused**, Rule E.1 |
+| `0x82` `codec.fnv1a` | `rd` **value**, `rs1` **value** | — | `count` = bytes, `0` refused | **bytes** | **executes** |
+| `0x83` `codec.checksum16` | `rd` **value**, `rs1` **value** | — | `count` = bytes, `0` refused | **bytes** | **executes** |
+
+**Rule E.1 — `codec.decompress` stays refused, and this is not an oversight.** The
+operation needs a decompressed-length bound `out.len` that Rule C's fixed workspace cannot
+supply. This is a property of the operation, not of the guess that was available:
+`compress` stops at the first byte that will not fit and reports how much it wrote, so a
+256-byte workspace is sound for it. `decompress` reads a length out of the *input stream*
+and returns `BufferTooSmall` if the decompressed text is larger — so a decompress with a
+256-byte bound would **refuse valid inputs whose output exceeds 256 bytes**, which is a
+silent narrowing of the operation's domain. There is no field left to carry a bound:
+`rd`, `rs1`, `rs2`, `rs3` and `count` are all named for this row. If the workspace size
+were raised to something larger it must be stated here, and any value chosen remains a cap
+the operation's own semantics do not have. The row is left refused with the reason rather
+than given a bound it cannot honour.
+
+**Rule E.2 — all thirteen operations map their `rd` result into the 64-bit register by
+bit reinterpretation only.** An `f64` determinant or matrix is not converted to an
+integer; it is written as its IEEE-754 bit pattern (`@bitCast`). This is why the
+misaligned-address check below is a refusal and not a silent copy: the operation reads and
+reinterpret-casts `f64`, so its input address must be 8-byte aligned, and an `fft.*`
+address must be 16-byte aligned for `Complex`.
+
+**Rule E.3 — an accelerator whose address, length or alignment is unusable refuses; it
+never reads unaligned memory, never truncates a range, and never returns zero.** Every
+address is bounds-checked against the memory image, and every alignment is checked against
+the element width, **before the first byte is touched**. A refusal reports the operation,
+the offending address and the length or width it required, in a sentence (§7). No
+`@alignCast` may be applied to a computed address: a misaligned cast is a panic, not a
+diagnostic.
+
+**Rule E.5 — `matrix.mul` is refused, and the reason is a genuine field shortage.**
+
+`matrix.multiply(a, b, out)` consumes **three addresses** (`a`, `b`, `out`) and needs
+**two orders** (`a`'s and `b`'s) to know how to index them. The word has four operand
+fields: `rd`, `rs1`, `rs2`, `rs3`. Five inputs cannot fit four fields, and `count` is
+already required to be zero on this row by the redundant-operand rule.
+
+Three ways out were considered and all three are rejected:
+
+1. **Read one order from `count`.** That abandons a uniform `count` rule, and it still
+   leaves only four slots for the remaining four inputs *only if* one order is assumed
+   square — which is inventing a constraint the operation does not have.
+2. **Take one order from the other matrix's data.** It would make `a` and `b` aliasable
+   in a way the model explicitly forbids (`multiply`'s own comment: *"`out` must not
+   alias either input"*), and the order would be read from a region the operation is
+   about to overwrite.
+3. **Drop an address and derive it.** Deriving `out` from `a`'s extent is exactly the
+   "workspace inferred from memory layout" fudge Rule C rejects for `compress`.
+
+A fourth option — splitting `matrix.mul` into two opcodes, one per operand order — is a
+**new opcode**, not an operand rule, so it is out of scope for an amendment that states
+it does not change the encoding. It is the right fix if this is wanted later, and it is
+recorded here so the next revision does not re-derive the shortage from scratch.
+
+So `matrix.mul` joins `codec.decompress` as refused. Its row above is left in the table
+with the reason rather than deleted, because the opcode is still assigned by 1.1 and a
+reader who assembles `matrix.mul` must be able to find out why it will not run.
+
+**Rule E.6 — `fft.ntt`'s `rs2` is reserved-zero in this revision, and that is a
+supported scope, not a silent narrowing.** 1.1's row says *"modulus in `rs2`"*, but the
+model (`fft.ntt`) takes no modulus parameter at all: it always works modulo
+`fft.ntt_modulus` (998 244 353). Accepting a modulus register and then ignoring it is the
+**F34 class** — a field that is validated but dropped, so a program that set a modulus of
+17 would receive residues modulo 998 244 353 and no diagnostic. Rule E's redundant-operand
+rule therefore applies to `rs2`: it must be zero. A revision that gives the model a
+modulus parameter should lift this reservation in the same change that lifts the model
+limit, not before.
+
+**Rule E.4 — the operation must not allocate.** All slices are views into the flat memory
+model (§2.3), per AGENTS.md §4.1. No accelerator operation may allocate inside the
+execution loop.
 
 ### 3.7 Thread instructions (high nibble `0x9`)
 
@@ -736,3 +951,5 @@ same change. Encoding changes are not a refactor.
 
 The Phase 4 RTL consumes §2–§5 directly, so an encoding change now invalidates the RTL
 and its testbench as well as the four software components above.
+
+| 1.18 | 2026-11-09 | **§3.6 gains its missing operand arithmetic (amendment 1.18), closing F36's contract half: ELEVEN of thirteen accelerators now execute, TWO stay refused.** Amendment 1.1 fixed which *field* holds which operand and stopped there, so `docs/STATUS.md` F36 recorded that the contract named a matrix with no dimension, an output buffer with no address, and a `count` with no source and no unit — and both the simulator and the RTL correctly refused all thirteen rather than invent one. **No bit layout changed and no field was added**; the amendment works within `rs2`/`rs3`/`reserved`/`count` and says so explicitly. Rules added: (A) an operand register named as an address holds the **address value**, not an index, with exactly two exceptions — the two matrix-header forms that read a register as `rows:u32 | cols:u32`; (B) matrix data is row-major `f64`; (C) `codec.compress`'s output goes to a **normative fixed 256-byte workspace at byte 65 280**, whose availability is a **CHECKED PRECONDITION** — an image under 65 536 bytes refuses with a sentence naming the address and length, touching no byte; (D) **§3.6 line 490's "derive the count from the destination register" is RETRACTED IN PLACE at line 490 and superseded for every operation** — `count = 0` is a diagnostic error wherever the operation needs a length, because reading `rd` as an input count names one register as both input and output and imposes an unstated calling convention; (E) a per-operation table giving every address, every dimension source, every output and every unit, with **redundant operands required to be zero rather than ignored**; (E.6) `fft.ntt`'s `rs2` is reserved-zero because the model takes no modulus parameter, so accepting one and ignoring it would be the F34 "validated but dropped" class. **The dimension decision is the load-bearing one:** `matrix.det` takes `n` from `rs3` (its `rs1` is the matrix address and `rd` receives the scalar result, so `rs2` and `rs3` were the only free fields); `matrix.invert` takes `n` from `rs2` because its `rs3` is needed for nothing else while `rs1`/`rd` are the input and output addresses; `matrix.identity` takes its order from `rs1` and requires `count = 0`, since making `count=N` the order was the only spelling the old table allowed and it was self-contradictory. `matrix.transform`'s rigid-body `m` is at the address in `rs2`, the only free field on that row. **TWO rows remain refused, and each for a stated reason that is not a missing constant.** (a) **`matrix.mul` (0x62)** needs *three* addresses and *two* orders — five inputs for four fields. Reading an order from `count`, deriving the product's address from an input's extent, and aliasing one matrix's header into another's data were each considered and rejected (Rule E.5); the honest fix is a second opcode, which an amendment that does not change the encoding may not add. (b) **`codec.decompress` (0x81)** needs an `out.len` bound, all five fields are spoken for on its row, and reusing `compress`'s 256-byte workspace would silently reject valid inputs whose decompressed form exceeds 256 bytes — a narrowed domain, not a missing number (Rule E.1). **A correction to this row's own first draft, kept rather than overwritten:** it claimed Rule C's workspace sits in "the 64 KiB image every execution entry point allocates". That was **false** — `src/crossarch.zig:42` allocates 4 672 bytes, `src/examples.zig:73` 20 480, and `Vm.init` accepts any slice, so 65 536 is a CLI convention and not a machine property. Rule C now states the precondition and the small-image refusal mode instead of assuming it. Verification is recorded in `docs/STATUS.md` F36's closing entry; CLS64 has no LLVM backend, so every word quoted for these operations is checked against this repository's own decoder and encoder pair, which is self-consistency and not independent verification. |

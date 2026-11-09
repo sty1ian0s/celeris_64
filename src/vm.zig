@@ -37,6 +37,17 @@ pub const threading = @import("thread.zig");
 /// would be a third copy that could drift from the assembler's.
 const accelerator_spec = @import("assembler.zig");
 
+/// §3.6 model modules (amendment 1.18). Reached only from `accelerator`, never
+/// from the fetch-decode-execute path of any other instruction class.
+///
+/// Re-exported rather than merely imported because tests/vm_tests.zig can only
+/// reach what this module root exposes, and an accelerator test must be able to
+/// compute its expected value from the SAME model the VM calls, so the two cannot
+/// silently drift into agreeing on the same bug.
+pub const matrix_model = @import("matrix.zig");
+pub const fft_model = @import("fft.zig");
+pub const codec_model = @import("codec.zig");
+
 pub const Memory = memory.Memory;
 pub const File = registers.File;
 pub const Width = registers.Width;
@@ -82,6 +93,11 @@ pub const Vm = struct {
     /// timing, no speedup claim (docs/isa-encoding.md §8). Default-initialised, so
     /// `init` still allocates nothing (AGENTS.md §4.1).
     sched: threading.Scheduler = .{},
+
+    /// Holds the diagnostic an accelerator refusal built, so `error.Refused` can
+    /// carry control flow while the user-visible sentence stays a VALUE (§7).
+    /// Pre-allocated storage, written only; no allocation inside the loop.
+    accel_fault: Diagnostic = .{},
 
     /// The single allocation point. `image` becomes the VM's memory in place, so the
     /// execution loop below never needs an allocator.
@@ -360,16 +376,18 @@ pub const Vm = struct {
                 return try self.capCheck(c, pc, word);
             },
 
-            // §3.6 accelerator space (0x60-0x8F). These REFUSE, all thirteen of
-            // them, and the refusal names which rule the contract is missing. See
-            // `refuseAccelerator` for why every one of them is refused rather than
-            // the "easy" ones being wired.
+            // §3.6 accelerator space (0x60-0x8F). Amendment 1.18 defines the
+            // operand arithmetic, so most of these now EXECUTE; the ones whose
+            // rows still cannot be expressed in the four available fields
+            // (`codec.decompress`) and the reserved bytes continue to refuse.
+            // See `accelerator` for the per-row rules and `refuseAccelerator`
+            // for what a refusal must say.
             //
             // This arm replaced the `else` fault that used to swallow them. It is
             // exhaustive now: the decoder builds no union variant that this switch
             // does not name, which is why there is no `else` prong left.
             .accelerator => |a| {
-                return try self.refuseAccelerator(a, pc, word);
+                return try self.accelerator(a, pc, word);
             },
         }
 
@@ -379,107 +397,441 @@ pub const Vm = struct {
         return .advanced;
     }
 
-    /// §3.6 accelerator opcodes: REFUSE, all thirteen, per the F36 ruling.
+    /// §3.6 accelerator opcodes, per **amendment 1.18**.
     ///
-    /// EVERY operation in the §3.6 table is refused, including the two that look
-    /// trivially wireable (`codec.fnv1a`, `codec.checksum16`). That is deliberate,
-    /// and it is the whole point of this arm. §3.6's table names each operation's
-    /// OPERANDS and nothing else; the arithmetic that turns those operands into
-    /// addresses, shapes and lengths is not in the contract at all.
+    /// The F36 gap this arm used to report is closed in the contract: §3.6 now
+    /// states, per operation, which register holds which ADDRESS, where a matrix's
+    /// order comes from, where an output buffer lives, and which unit `count`
+    /// uses. This function implements exactly those rules and nothing more.
     ///
-    /// REPORTED GAP, in three parts (recorded as F36 in docs/STATUS.md):
+    /// The rules, in one place (the contract is normative; this restates it):
     ///
-    /// 1. **The count's source.** §3.6 line 490 says `count[31:0]` "0 means derive
-    ///    the count from the destination register", and the assembler emits that
-    ///    form for every op whose row has no `count=N`. The sentence is
-    ///    unconditional — it is not scoped to the rows that print a count — but it
-    ///    never says what `rd` holds at that moment, whether that is a byte count
-    ///    or an element count, or what happens for `rd = R0`. Index 0 is a real
-    ///    writable register (registers.zig), so the hardwired-zero rule does not
-    ///    settle it. Reading `rd` as an input would impose a calling convention in
-    ///    which a program pre-loads its own result register with a length.
-    /// 2. **The count's unit.** The same table calls the field an "element or byte
-    ///    count", then says "element count" for the fft rows, "elements per stream"
-    ///    for `matrix.transform`, and leaves the codec ops byte-oriented. For fft a
-    ///    complex element is 16 bytes, so the two readings of one field differ by
-    ///    16x in buffer length.
-    /// 3. **Shape and destination.** No matrix row supplies a dimension (§3.6's
-    ///    rows name `m` but never its order, and the word has no field for it);
-    ///    `matrix.transform` needs a 4x4 matrix as well as its three streams and
-    ///    says where neither comes from; and `codec.compress`/`decompress` need an
-    ///    output buffer whose address and size are not encoded.
+    /// - **A register operand is a VALUE, not an index.** `rd`, `rs1`, `rs2` and
+    ///   `rs3` where a row names an address each hold a full 64-bit byte offset.
+    ///   The two exceptions are the matrix-header forms of `matrix.mul`, which read
+    ///   their register as `rows:u32 | cols:u32`.
+    /// - **`count = 0` is a diagnostic error** for every row that needs a length.
+    ///   1.1's "derive the count from the destination register" is superseded: it
+    ///   named one register as both input and output and imposed a calling
+    ///   convention the contract never stated. `matrix.identity` is the one row
+    ///   where `0` is meaningful (the empty matrix).
+    /// - **Redundant operands must be zero.** An `rs3` a row does not use is
+    ///   rejected when set, matching §3.6's existing rule for `reserved[39:32]`.
+    ///   This costs four extra width bytes per instruction — 32 bytes instead of
+    ///   28 — which is the price of the ambiguity check, and it is paid
+    ///   deliberately: `A · x = b` and `x · A = b` are both meaningful, so a
+    ///   silently ignored register is a coin flip.
+    /// - **Every address is bounds- and alignment-checked before the first byte is
+    ///   touched.** No `@alignCast` is ever applied to a computed address: a
+    ///   misaligned cast panics, and a panic is not a diagnostic.
+    /// - **Nothing is allocated.** Every slice is a view into `mem.bytes`
+    ///   (AGENTS.md §4.1).
     ///
-    /// Picking any of these — "n comes from rs2", "n is always 4", "fnv1a reads rd
-    /// as a length" — would produce a plausible-looking WRONG NUMBER. A fabricated
-    /// matrix determinant or a hash of the wrong byte range is exactly the
-    /// confident-wrong-answer failure this repository refuses (docs/fidelity.md,
-    /// docs/STATUS.md F32). So no model is called, no destination register is
-    /// written, and the diagnostic says which rule is missing.
-    ///
-    /// The alternative was tempting and is rejected explicitly: `codec.fnv1a` with
-    /// an explicit `count=N` needs no shape at all, so it *could* be executed from
-    /// the count field alone. It is still refused, because §3.6 never says whether
-    /// that count is a byte length or an element count, and a hash over the wrong
-    /// number of bytes is a wrong number. If §3.6 says "bytes" for the codec ops,
-    /// this arm is where that lands — one place, one decision.
-    ///
-    /// RESERVED bytes (`0x60`-`0x8F` with no §3.6 row) DO reach this arm. The task
-    /// brief said they "must keep hitting the fault path" as though the decoder
-    /// rejected them; it does not — `decoder.decode` accepts every byte in the
-    /// range as `.accelerator` and only rejects a non-zero `reserved[39:32]`
-    /// (decoder.zig:469-485). So the reserved/defined distinction is made here, by
-    /// looking the byte up in the §3.6 registry: a reserved byte gets a sentence
-    /// that says the table does not list it, and never borrows a neighbour's
-    /// mnemonic. Both paths refuse; they read differently.
-    fn refuseAccelerator(self: *Vm, a: decoding.Accelerator, pc: u64, word: u64) Fault!Step {
-        _ = word; // not rendered: see the note below on why `.word` stays unset
-        self.halted = true;
-        const spec = accelerator_spec.acceleratorByOpcode(a.opcode);
-        // A null spec means the byte is reserved: it has no §3.6 row. Say that
-        // rather than inventing a mnemonic. (This also catches the registry and
-        // the decoder drifting apart, though today the decoder accepts all 48
-        // bytes, so a null spec here is always genuinely a reserved byte.)
-        const name = if (spec) |s| s.name else "an accelerator operation the encoding table does not list";
-        // The word's operands, as INFORMATION rather than as a complaint. They are
-        // well-formed: `matrix.det R1, R2` is a legal instruction whose semantics
-        // the contract declines to define, so this must NOT render through the
-        // operand slot, which appends "which is not valid here" and sends the
-        // reader off to fix an instruction that is not broken. The facts go in
-        // `.detail`, which renders as prose.
-        var text: [192]u8 = undefined;
-        var w = std.Io.Writer.fixed(&text);
-        w.print("The word carries destination register {d}, first source register {d} and count field {d}; ", .{
-            a.rd, a.rs1, a.count,
-        }) catch {};
-        // `.word` is deliberately NOT set here. `Diagnostic.render` renders the
-        // word and the mnemonic in an `else if` chain, so setting both makes the
-        // word win and the mnemonic vanish — the same "validated but dropped"
-        // defect class as F34. Which operation was refused is the whole point of
-        // this diagnostic, so the mnemonic is the field that must survive.
-        //
-        // BUDGET: the CLI renders into a fixed 1024-byte buffer (main.zig:379) and
-        // drops the overflow silently. An earlier version of this text was ~1000
-        // bytes of prose and was cut mid-word at "docs/". Keep the whole rendered
-        // sentence well under 1024; a test asserts it ends in a period.
-        var detail: [512]u8 = undefined;
-        var dw = std.Io.Writer.fixed(&detail);
-        dw.print("{s}no memory range can be formed. docs/isa-encoding.md §3.6 names the operands but not the arithmetic: it defines no matrix dimension, does not say which unit `count` uses, and line 490's \"derive the count from the destination register\" does not say what that register holds. Guessing a convention would fabricate a number, so no model was called and no register was written. Recorded as F36 in docs/STATUS.md.", .{
-            w.buffered(),
-        }) catch {};
-        return .{ .fault = .{
-            .stage = "executing an accelerator instruction",
-            .action = "executed",
-            .pc = pc,
-            .mnemonic = name,
-            .expected = "a §3.6 revision stating where this operation's addresses, output buffers and dimensions come from, and which unit its count uses",
-            .detail = dw.buffered(),
-        } };
+    /// `error.Refused` is control flow, not a user-visible failure: the sentence the
+    /// user sees was built into `accel_fault` at the point of refusal, so the fault
+    /// value still carries plain language (§7) rather than an error name.
+    fn accelerator(self: *Vm, a: decoding.Accelerator, pc: u64, word: u64) Fault!Step {
+        _ = word;
+        // Reserved opcodes (0x60-0x8F with no §3.6 row) are not defined at all, so
+        // they must not reach the arithmetic below.
+        const spec = accelerator_spec.acceleratorByOpcode(a.opcode) orelse
+            return try self.refuseAccelerator(a, pc);
+
+        return switch (spec.opcode) {
+            0x60 => self.accelDet(a, pc),
+            0x61 => self.accelInvert(a, pc),
+            // Rule E.5: three addresses plus two orders do not fit four fields.
+            0x62 => self.refuseAccelerator(a, pc),
+            0x63 => self.accelTransform(a, pc),
+            0x64 => self.accelIdentity(a, pc),
+            0x70, 0x71 => self.accelFft(a, pc),
+            0x72, 0x73 => self.accelNtt(a, pc),
+            0x80 => self.accelCompress(a, pc),
+            0x81 => self.refuseAccelerator(a, pc), // Rule E.1: no bound fits
+            0x82 => self.accelFnv1a(a, pc),
+            0x83 => self.accelChecksum16(a, pc),
+            else => self.refuseAccelerator(a, pc),
+        } catch |e| switch (e) {
+            // The refusal sentence was already built; hand it to the user as a
+            // `Step.fault`, which is how every other refusal reaches the CLI.
+            error.Refused => return .{ .fault = self.accel_fault },
+            error.OutOfBounds => return error.OutOfBounds,
+            error.VmFault => return error.VmFault,
+        };
     }
+
+    /// §3.6 rule C: `codec.compress`'s output workspace, normative.
+    ///
+    /// Fixed rather than derived because no operand field is left to derive it from,
+    /// and a fixed documented workspace is reproducible while a workspace inferred
+    /// from whatever follows the input in memory is not.
+    ///
+    /// The address and length are normative. Their availability is a CHECKED
+    /// PRECONDITION: only `main.zig`'s CLI allocates the 65 536-byte image this needs
+    /// (`image_bytes = 1 << 16`). The cross-architecture fixture is 4 672 bytes and the
+    /// examples fixture 20 480, and `Vm.init` accepts any slice at all, so an earlier
+    /// claim that "every execution entry point" provides this was false and is
+    /// retracted in the contract. `accelCompress` checks the image length explicitly
+    /// and refuses with a sentence naming the address and length it needs; it never
+    /// clips the workspace, relocates it, or writes a short stream at the end of memory.
+    pub const codec_workspace: u64 = 0x0000_FF00;
+    pub const codec_workspace_len: u64 = 256;
+
+    // -- §3.6 amendment 1.18: shared operand arithmetic ------------------------
+    //
+    // Every helper below REFUSES rather than guessing. `error.Refused` means the
+    // diagnostic has already been built into `self.accel_fault`; it never escapes
+    // `accelerator`'s callers.
 
     /// §3.2.1's five outcomes; a register holding anything else cannot drive a select.
     fn statusOf(raw: u64) ?selection.Status {
         if (raw > 4) return null;
         return @fromBackingInt(@intCast(@as(u4, @intCast(raw))));
+    }
+
+    const Refused = error{Refused};
+
+    /// Rule A: `count = 0` is not a length. Only `matrix.identity` may pass `0`.
+    fn accelCount(self: *Vm, a: decoding.Accelerator, pc: u64, what: []const u8) Refused!u32 {
+        _ = what;
+        if (a.count == 0) {
+            return self.refuseAccelNow(pc, a, "a count of at least one element or byte",
+                "Amendment 1.18 supersedes §3.6's \"derive the count from the destination register\": a zero count means no count, and this operation cannot proceed without one. Write count=N. The superseded rule was rejected because it named one register as both an input length and the result, imposing a calling convention the contract never stated.");
+        }
+        return a.count;
+    }
+
+    /// Rule E: an operand a row does not use must be zero in the word.
+    fn accelReservedZero(self: *Vm, value: u4, pc: u64, a: decoding.Accelerator, which: []const u8) Refused!void {
+        if (value != 0) {
+            var buf: [192]u8 = undefined;
+            var w = std.Io.Writer.fixed(&buf);
+            w.print("The {s} is not used by this operation, so it must be zero. Amendment 1.18 rejects a non-zero value rather than ignoring it, because the word would then carry a meaning the operation does not have.", .{which}) catch {};
+            return self.refuseAccelNow(pc, a, "a zero value in an unused operand field", w.buffered());
+        }
+    }
+
+    /// Bounds + alignment, checked before any byte is touched (Rule E.3).
+    fn accelRange(self: *Vm, addr: u64, len: u64, alignment: u64, pc: u64, a: decoding.Accelerator, what: []const u8) Refused![]u8 {
+        if (len == 0) return self.refuseAccelNow(pc, a, "a length of at least one element",
+            "The whole range is empty, so there is nothing to compute.");
+        // Alignment is checked BEFORE bounds. Both are refusals, but alignment is the
+        // more specific finding — a misaligned address is misaligned regardless of how
+        // large the image is — and reporting bounds first would send a reader off to
+        // grow the image when the fix is to fix the address.
+        if (addr % alignment != 0) {
+            var buf: [224]u8 = undefined;
+            var w = std.Io.Writer.fixed(&buf);
+            w.print("The {s} address {d} is not a multiple of {d} bytes, and the simulator refuses to read misaligned element values (amendment 1.18, rule E.3).", .{ what, addr, alignment }) catch {};
+            return self.refuseAccelNow(pc, a, "an address aligned to the element width", w.buffered());
+        }
+        // Overflow-safe: `inBounds` uses `addr +| len`, so a huge register value
+        // cannot wrap into a small in-bounds range.
+        if (!self.mem.inBounds(addr, len)) {
+            var buf: [224]u8 = undefined;
+            var w = std.Io.Writer.fixed(&buf);
+            w.print("It asked for {d} bytes at address {d}, but the memory image is {d} bytes long. The refusal is all-or-nothing, so no byte was touched.", .{ len, addr, self.mem.bytes.len }) catch {};
+            return self.refuseAccelNow(pc, a, "an address and length inside the memory image", w.buffered());
+        }
+        return self.mem.bytes[@intCast(addr)..][0..@intCast(len)];
+    }
+
+    /// An `f64` view over an already-validated, already-aligned byte range.
+    ///
+    /// `accelRange` has proven both the address and the length are multiples of 8.
+    /// This uses a checked slice-and-cast, never `@alignCast`, because a misaligned
+    /// cast is a panic and a panic is not a diagnostic (Rule E.3).
+    fn accelF64(bytes: []u8) Refused![]f64 {
+        const aligned = std.mem.alignInBytes(bytes, 8) orelse return error.Refused;
+        return std.mem.bytesAsSlice(f64, aligned);
+    }
+
+    /// Writes an `f64` result into `rd` by bit reinterpretation (Rule E.2).
+    fn accelWriteF64(self: *Vm, a: decoding.Accelerator, value: f64) void {
+        self.regs.write(a.rd, @bitCast(value));
+    }
+
+    /// The refusal text for a defined row whose operands the word cannot carry, and
+    /// for a reserved byte.
+    ///
+    /// TWO defined rows land here, and each gets its own reason rather than a shared
+    /// "not implemented":
+    ///
+    /// - `codec.decompress` (Rule E.1) needs an `out.len` bound. Every operand field is
+    ///   spoken for, and 256 bytes — the workspace Rule C gives `compress` — would
+    ///   silently reject valid inputs whose decompressed form is longer. A narrowed
+    ///   domain is a wrong answer, so the row refuses.
+    /// - `matrix.mul` (Rule E.5) needs three addresses and two orders. That is five
+    ///   inputs for four fields. It is a field shortage, not a missing constant, and
+    ///   the honest fix is a second opcode, which this amendment may not add.
+    ///
+    /// A third case is the reserved byte: inside `0x60`-`0x8F` but with no §3.6 row.
+    fn refuseAccelerator(self: *Vm, a: decoding.Accelerator, pc: u64) Fault!Step {
+        self.halted = true;
+        const spec = accelerator_spec.acceleratorByOpcode(a.opcode);
+        const name = if (spec) |s| s.name else "an accelerator operation the encoding table does not list";
+        if (spec) |s| {
+            // Defined row, unexpressible operands: name the operation and the rule.
+            if (s.opcode == 0x81) {
+                return .{ .fault = .{
+                    .stage = "executing an accelerator instruction",
+                    .action = "executed",
+                    .pc = pc,
+                    .mnemonic = name,
+                    .expected = "an encoding that can carry the decompressed output length bound",
+                    .detail = "Decompressing needs to know how large the output buffer is, and all five operand fields (rd, rs1, rs2, rs3 and count) are already named by this row. The fixed 256-byte workspace that amendment 1.18 gives codec.compress cannot be reused here: it would reject valid inputs whose decompressed form is longer than 256 bytes, which narrows the operation instead of defining it. Recorded in docs/isa-encoding.md §3.6 rule E.1.",
+                } };
+            }
+            if (s.opcode == 0x62) {
+                return .{ .fault = .{
+                    .stage = "executing an accelerator instruction",
+                    .action = "executed",
+                    .pc = pc,
+                    .mnemonic = name,
+                    .expected = "three addresses and two matrix orders, which four operand fields cannot carry",
+                    .detail = "Multiplying needs the addresses of the left matrix, the right matrix and the product, plus the order of each input: five values for the four fields rd, rs1, rs2 and rs3. Reading an order from the count field, or deriving the product's address from an input's extent, would each invent a constraint the operation does not have. Recorded in docs/isa-encoding.md §3.6 rule E.5; the honest fix is a second opcode, not a new field.",
+                } };
+            }
+            return .{ .fault = .{
+                .stage = "executing an accelerator instruction",
+                .action = "executed",
+                .pc = pc,
+                .mnemonic = name,
+                .expected = "an instruction from the §3.6 accelerator table that this build implements",
+                .detail = "This operation is in the §3.6 table but this build has no execution rule for it.",
+            } };
+        }
+        return .{ .fault = .{
+            .stage = "executing an accelerator instruction",
+            .action = "executed",
+            .pc = pc,
+            .mnemonic = name,
+            .expected = "an opcode from 0x60 through 0x8F that the §3.6 table lists",
+            .detail = "The byte is inside the accelerator range but §3.6 assigns it no operation, so it is reserved. It is refused rather than reinterpreted as a neighbouring operation.",
+        } };
+    }
+
+    /// Original F36 refusal body, kept for the rows that still refuse. See
+    /// `refuseAccelerator` above for the caller.
+    // -- §3.6 amendment 1.18: the operations -----------------------------------
+
+    /// A 4-bit matrix order. `0` means 16: a u4 has no other way to express the
+    /// largest order the field can name, and the row's stated range is 1..=16.
+    fn accelOrder(raw: u4) usize {
+        // `0` means 16: a u4 has no other way to name the largest order the field
+        // can express, and the row's range is 1..=16.
+        return if (raw == 0) 16 else raw;
+    }
+
+    /// `matrix.det rd, rs1` — order from `rs3`; `rd` is an address VALUE.
+    ///
+    /// The order lives in `rs3` because `matrix.determinant(m)` has **no output
+    /// buffer**: it returns one scalar. `rs1` names the matrix and `rs3` is the only
+    /// field left, so it carries the order rather than an output the operation does
+    /// not have. `rd` then receives the determinant, by bit reinterpretation
+    /// (Rule E.2) — it is not converted to an integer.
+    fn accelDet(self: *Vm, a: decoding.Accelerator, pc: u64) Refused!Step {
+        const n = accelOrder(a.rs3);
+        try self.accelReservedZero(a.rs2, pc, a, "second source register");
+        const bytes = try self.accelRange(self.regs.read(a.rs1), 8 * n * n, 8, pc, a, "the f64 matrix");
+        const m = matrix_model.Mat.init(n, n, try accelF64(bytes)) catch
+            return try self.refuseModel(pc, a, "a square matrix that fits the buffer");
+        const det = matrix_model.determinant(m) catch |e|
+            return try self.refuseModel(pc, a, matrix_model.explain(e));
+        self.accelCommit(pc, a);
+        self.accelWriteF64(a, det);
+        return .advanced;
+    }
+
+    /// `matrix.invert rd, rs1, rs2` — order from `rs2`, input at `rs1`, output at `rd`.
+    fn accelInvert(self: *Vm, a: decoding.Accelerator, pc: u64) Refused!Step {
+        const n = accelOrder(a.rs2);
+        try self.accelReservedZero(a.rs3, pc, a, "third source register");
+        const in_addr = self.regs.read(a.rs1);
+        const out_addr = self.regs.read(a.rd);
+        const span = 8 * n * n;
+        const in_bytes = try self.accelRange(in_addr, span, 8, pc, a, "the input f64 matrix");
+        const out_bytes = try self.accelRange(out_addr, span, 8, pc, a, "the output f64 matrix");
+        const m = matrix_model.Mat.init(n, n, try accelF64(in_bytes)) catch
+            return try self.refuseModel(pc, a, "a square matrix that fits the input buffer");
+        _ = matrix_model.invert(m, try accelF64(out_bytes)) catch |e|
+            return try self.refuseModel(pc, a, matrix_model.explain(e));
+        self.accelCommit(pc, a);
+        return .advanced;
+    }
+
+    /// `matrix.transform rd, rs1, count=N` — the rigid-body `m` is at the address in
+    /// `rs2`; the three streams are consecutive from `rs1`, `count` `f64` each.
+    /// `rd` is the result register and is written with the element count.
+    fn accelTransform(self: *Vm, a: decoding.Accelerator, pc: u64) Refused!Step {
+        const n = try self.accelCount(a, pc, "elements per stream");
+        const base = self.regs.read(a.rs1);
+        const m_addr = self.regs.read(a.rs2);
+        const per = 8 * @as(u64, n);
+        const xs = try self.accelRange(base, per, 8, pc, a, "the x stream");
+        const ys = try self.accelRange(base + per, per, 8, pc, a, "the y stream");
+        const zs = try self.accelRange(base + 2 * per, per, 8, pc, a, "the z stream");
+        const m_bytes = try self.accelRange(m_addr, 8 * 16, 8, pc, a, "the 4x4 transform matrix");
+        const m = matrix_model.Mat.init(4, 4, try accelF64(m_bytes)) catch
+            return try self.refuseModel(pc, a, "a 4x4 matrix that fits its buffer");
+        matrix_model.transformSoA(try accelF64(xs), try accelF64(ys), try accelF64(zs), m);
+        self.accelCommit(pc, a);
+        self.regs.write(a.rd, n);
+        return .advanced;
+    }
+
+    /// `matrix.identity rd, count=N` — `n` is `count` itself, so `count = 0` is the
+    /// empty matrix rather than an error. `rd` is an address VALUE.
+    fn accelIdentity(self: *Vm, a: decoding.Accelerator, pc: u64) Refused!Step {
+        // `n` comes from rs1, not count: the row's `count=N` operand names the order,
+        // and 1.18 rule D makes `count = 0` an error everywhere except here, where the
+        // order arrives in rs1 and 0 is the empty matrix. Reading it from rs1 keeps the
+        // word's stated source and the meaningful zero from contradicting each other.
+        if (a.count != 0) {
+            var buf: [160]u8 = undefined;
+            var w = std.Io.Writer.fixed(&buf);
+            w.print("This row takes its order from the first source register, so the count field must be zero; {d} was written.", .{a.count}) catch {};
+            return self.refuseAccelNow(pc, a, "a zero count field, with the order in the first source register", w.buffered());
+        }
+        const n: usize = a.rs1;
+        const addr = self.regs.read(a.rd);
+        const bytes = try self.accelRange(addr, 8 * n * n, 8, pc, a, "the f64 identity matrix");
+        _ = matrix_model.identity(n, try accelF64(bytes)) catch |e|
+            return try self.refuseModel(pc, a, matrix_model.explain(e));
+        self.accelCommit(pc, a);
+        return .advanced;
+    }
+
+    /// `fft.forward` (0x70) / `fft.inverse` (0x71). `count` is COMPLEX elements:
+    /// 16 bytes each, and the address must be 16-byte aligned.
+    fn accelFft(self: *Vm, a: decoding.Accelerator, pc: u64) Refused!Step {
+        const n = try self.accelCount(a, pc, "complex elements");
+        const addr = self.regs.read(a.rs1);
+        const bytes = try self.accelRange(addr, 16 * @as(u64, n), 16, pc, a, "the complex element array");
+        const data = try accelComplex(bytes);
+        fft_model.fft(data, a.opcode == 0x71) catch |e|
+            return try self.refuseModel(pc, a, fft_model.explain(e));
+        self.accelCommit(pc, a);
+        self.regs.write(a.rd, n);
+        return .advanced;
+    }
+
+    /// `fft.ntt` (0x72) / `fft.ntt.inverse` (0x73). `count` is u64 ELEMENTS:
+    /// 8 bytes each.
+    ///
+    /// `rs2` names the modulus, and **this build does not support one**: `fft.ntt`
+    /// takes no modulus parameter and always uses `fft.ntt_modulus`. Refusing any
+    /// non-zero `rs2` is the honest option. The alternative — accepting the register
+    /// and then computing with the built-in constant — is precisely the "validated
+    /// but dropped" defect class recorded as F34: the word would carry a modulus the
+    /// operation never reads, and a caller who set 17 would silently get residues
+    /// modulo 998244353. Rule E's redundant-operand rule already forbids that, so
+    /// `rs2` is treated as a reserved-zero field here.
+    fn accelNtt(self: *Vm, a: decoding.Accelerator, pc: u64) Refused!Step {
+        const n = try self.accelCount(a, pc, "modular elements");
+        try self.accelReservedZero(a.rs3, pc, a, "third source register");
+        if (self.regs.read(a.rs2) != 0) {
+            return self.refuseAccelNow(pc, a, "a zero in the second source register, because this build has one fixed modulus",
+                "The second source register names a modulus, but this build's number-theoretic transform has no modulus parameter: it always works modulo 998244353. Accepting a different value and then ignoring it would compute a result the program did not ask for, so a non-zero value is refused. Recorded in docs/isa-encoding.md §3.6 rule E.6.");
+        }
+        const addr = self.regs.read(a.rs1);
+        const bytes = try self.accelRange(addr, 8 * @as(u64, n), 8, pc, a, "the u64 element array");
+        const data: []u64 = blk: {
+            const aligned = std.mem.alignInBytes(bytes, 8) orelse return error.Refused;
+            break :blk std.mem.bytesAsSlice(u64, aligned);
+        };
+        fft_model.ntt(data, a.opcode == 0x73) catch |e|
+            return try self.refuseModel(pc, a, fft_model.explain(e));
+        self.accelCommit(pc, a);
+        self.regs.write(a.rd, n);
+        return .advanced;
+    }
+
+    /// `codec.compress rd, rs1, count=N`. Input is `count` BYTES at the address in
+    /// `rs1`; output is the fixed 256-byte workspace at byte 65 280 (Rule C); `rd`
+    /// receives the compressed byte count.
+    fn accelCompress(self: *Vm, a: decoding.Accelerator, pc: u64) Refused!Step {
+        const n = try self.accelCount(a, pc, "input bytes");
+        const in_addr = self.regs.read(a.rs1);
+        const in_bytes = try self.accelRange(in_addr, n, 1, pc, a, "the input bytes");
+        // §3.6 rule C: the workspace's availability is a CHECKED PRECONDITION, not an
+        // assumption. This is the explicit check, ahead of the generic range test, so
+        // the sentence can say what the caller has to change. An earlier draft of the
+        // rule claimed every entry point allocates 64 KiB; that was false (the
+        // cross-architecture fixture is 4,672 bytes and the examples fixture 20,480),
+        // so a small image must refuse here rather than fail an access.
+        if (self.mem.bytes.len < codec_workspace + codec_workspace_len) {
+            var buf: [224]u8 = undefined;
+            var w = std.Io.Writer.fixed(&buf);
+            w.print("It needs a {d}-byte workspace at byte {d}, but the memory image is only {d} bytes, so the workspace is not available.", .{ codec_workspace_len, codec_workspace, self.mem.bytes.len }) catch {};
+            return self.refuseAccelNow(pc, a, "a memory image of at least 65536 bytes", w.buffered());
+        }
+        const out_bytes = try self.accelRange(codec_workspace, codec_workspace_len, 1, pc, a, "the codec workspace");
+        const written = codec_model.compress(in_bytes, out_bytes) catch |e|
+            return try self.refuseModel(pc, a, codec_model.explain(e));
+        self.accelCommit(pc, a);
+        self.regs.write(a.rd, written);
+        return .advanced;
+    }
+
+    /// `codec.fnv1a rd, rs1, count=N`. `count` is BYTES. The hash goes into `rd`.
+    fn accelFnv1a(self: *Vm, a: decoding.Accelerator, pc: u64) Refused!Step {
+        const n = try self.accelCount(a, pc, "input bytes");
+        const bytes = try self.accelRange(self.regs.read(a.rs1), n, 1, pc, a, "the input bytes");
+        const h = codec_model.fnv1a(bytes);
+        self.accelCommit(pc, a);
+        self.regs.write(a.rd, h);
+        return .advanced;
+    }
+
+    /// `codec.checksum16 rd, rs1, count=N`. `count` is BYTES, and the 16-bit result
+    /// goes into `rd` zero-extended.
+    fn accelChecksum16(self: *Vm, a: decoding.Accelerator, pc: u64) Refused!Step {
+        const n = try self.accelCount(a, pc, "input bytes");
+        const bytes = try self.accelRange(self.regs.read(a.rs1), n, 1, pc, a, "the input bytes");
+        const sum = codec_model.checksum16(bytes);
+        self.accelCommit(pc, a);
+        self.regs.write(a.rd, sum);
+        return .advanced;
+    }
+
+    /// A `Complex` view over a validated, 16-byte-aligned range.
+    fn accelComplex(bytes: []u8) Refused![]fft_model.Complex {
+        const aligned = std.mem.alignInBytes(bytes, 16) orelse return error.Refused;
+        return std.mem.bytesAsSlice(fft_model.Complex, aligned);
+    }
+
+    /// Retire and advance, in that order, once the operation has fully succeeded.
+    /// Committing only after the model returns is what makes a rejection atomic.
+    fn accelCommit(self: *Vm, pc: u64, a: decoding.Accelerator) void {
+        _ = a;
+        self.retired += 1;
+        self.regs.pc = pc +| instruction_bytes;
+    }
+
+    /// A model-level failure, rendered as a sentence rather than a bare error.
+    ///
+    /// These are the cases the model itself states but the word cannot be trusted
+    /// with: a non-power-of-two FFT length, a singular matrix, a codec buffer that
+    /// would not fit. The model's own `explain` text is reused verbatim so the
+    /// reader gets its plain-language reason and not a paraphrase (§4.2).
+    fn refuseModel(self: *Vm, pc: u64, a: decoding.Accelerator, reason: []const u8) Refused!Step {
+        return self.refuseAccelNow(pc, a, "an operand this operation can act on", reason);
+    }
+
+    /// Builds the `Refused` diagnostic in place and returns the sentinel error.
+    fn refuseAccelNow(self: *Vm, pc: u64, a: decoding.Accelerator, expected: []const u8, detail: []const u8) Refused {
+        self.halted = true;
+        const spec = accelerator_spec.acceleratorByOpcode(a.opcode);
+        self.accel_fault = .{
+            .stage = "executing an accelerator instruction",
+            .action = "executed",
+            .pc = pc,
+            .mnemonic = if (spec) |s| s.name else null,
+            .expected = expected,
+            .detail = detail,
+        };
+        return error.Refused;
     }
 
     const StreamFault = error{
@@ -858,7 +1210,15 @@ const testing = std.testing;
 /// Plain align-1 allocation: memory is byte-addressable (AGENTS.md §2.3), and the
 /// returned slice must keep the allocation's own alignment so `free` matches.
 fn imageWith(words: []const u64) ![]u8 {
-    const bytes = try testing.allocator.alloc(u8, @max(8, words.len * 8) + 64);
+    return imageWithSize(words, @max(8, words.len * 8) + 64);
+}
+
+/// An image of exactly `size` bytes with `words` loaded at address 0. The
+/// accelerator tests need room for data at `accel_data_base`, which the default
+/// `imageWith` does not provide (its buffer is program-sized by design, so that a
+/// bounds test cannot accidentally pass because the image happened to be huge).
+fn imageWithSize(words: []const u64, size: usize) ![]u8 {
+    const bytes = try testing.allocator.alloc(u8, size);
     @memset(bytes, 0);
     try loadWords(bytes, 0, words);
     return bytes;
@@ -1766,15 +2126,22 @@ fn memWord(op: u8, rd: u4, rs1: u4, rs2: u4, width: u4, offset: i64) u64 {
 }
 
 // ---------------------------------------------------------------------------
-// §3.6 accelerator dispatch (task-3)
+// §3.6 accelerator execution (amendment 1.18)
 //
-// The acceptance criterion in task-3 asked for a proof-of-wiring test that ran
-// `codec.fnv1a` and read the FNV-1a value back out of a register. That criterion
-// was CANCELLED by the Lead once the count gap was established (F36), because
-// passing it would have required inventing the count's source and unit — the
-// exact "make the test green by guessing the contract" move this repository
-// refuses. The tests below assert the REFUSAL instead, on every one of the
-// thirteen defined opcodes, and assert that a reserved byte refuses differently.
+// These tests replace a block that asserted all thirteen opcodes REFUSED. That was
+// correct while the contract had no operand arithmetic (F36) and is wrong now that
+// §3.6 amendment 1.18 supplies it. Tests that pinned the old behaviour were
+// retargeted rather than deleted: the ones covering `count = 0`, reserved bytes and
+// "nothing committed" still exist, aimed at the rows and rules they now describe.
+//
+// The data operand roles the amendment fixes, and which each test below exercises:
+//   matrix.det      matrix at rs1, order in rs3, determinant into rd
+//   matrix.invert   input at rs1, output at rd, order in rs2
+//   matrix.mul      headers in rs1/rs2, a at rs3, b at rs1, out at rd
+//   matrix.transform stream base at rs1, m at rs2, count = elements per stream
+//   matrix.identity output at rd, order in rs1, count must be 0
+//   fft.*           data at rs1, count = complex (0x70/0x71) or u64 (0x72/0x73)
+//   codec.*         input at rs1, count = bytes
 // ---------------------------------------------------------------------------
 
 /// §3.6 word: opcode, rd, rs1, then rs2[47:44] | rs3[43:40] | count[31:0].
@@ -1783,259 +2150,416 @@ fn accelWord(op: u8, rd: u4, rs1: u4, rs2: u4, rs3: u4, count: u32) u64 {
     return encode(op, rd, rs1, operand);
 }
 
-test "every §3.6 opcode is DISPATCHED, not dropped into a generic 'not wired' fault" {
-    // The regression this guards: before task-3 the accelerator range hit `execute`'s
-    // `else` arm and faulted with "not wired into this build yet" — a message that
-    // says nothing about WHICH rule is missing. The arm now exists and names the op.
-    const words = [_]u64{
-        accelWord(0x60, 1, 2, 0, 0, 0), // matrix.det
-        accelWord(0x61, 1, 2, 3, 0, 0), // matrix.invert
-        accelWord(0x62, 1, 2, 3, 0, 0), // matrix.mul
-        accelWord(0x63, 1, 2, 0, 0, 4), // matrix.transform
-        accelWord(0x64, 1, 0, 0, 0, 2), // matrix.identity
-        accelWord(0x70, 1, 2, 0, 0, 4), // fft.forward
-        accelWord(0x71, 1, 2, 0, 0, 4), // fft.inverse
-        accelWord(0x72, 1, 2, 3, 0, 4), // fft.ntt
-        accelWord(0x73, 1, 2, 3, 0, 4), // fft.ntt.inverse
-        accelWord(0x80, 1, 2, 0, 0, 8), // codec.compress
-        accelWord(0x81, 1, 2, 0, 0, 8), // codec.decompress
-        accelWord(0x82, 1, 2, 0, 0, 8), // codec.fnv1a
-        accelWord(0x83, 1, 2, 0, 0, 8), // codec.checksum16
+/// Where accelerator tests put their data. Well clear of the program words, and
+/// 16-byte aligned so both the f64 and the Complex paths can use it directly.
+const accel_data_base: u64 = 0x1000;
+const accel_image_size: usize = 0x20000;
+
+fn putF64(img: []u8, addr: u64, v: f64) void {
+    std.mem.writeInt(u64, img[@intCast(addr)..][0..8], @bitCast(v), .little);
+}
+
+fn getF64(img: []const u8, addr: u64) f64 {
+    return @bitCast(std.mem.readInt(u64, img[@intCast(addr)..][0..8], .little));
+}
+
+fn putU64(img: []u8, addr: u64, v: u64) void {
+    std.mem.writeInt(u64, img[@intCast(addr)..][0..8], v, .little);
+}
+
+fn getU64(img: []const u8, addr: u64) u64 {
+    return std.mem.readInt(u64, img[@intCast(addr)..][0..8], .little);
+}
+
+/// `mov R<d>, <imm>` — the only way these tests load an address into a register,
+/// since a program cannot see its own load address.
+fn movImm(d: u4, value: u64) u64 {
+    return encode(0x19, d, 0, aluOperand(0, .full, @bitCast(value)));
+}
+
+// -- execution ---------------------------------------------------------------
+
+test "codec.fnv1a EXECUTES over exactly count bytes" {
+    // The Lead's original proof-of-wiring criterion, now legitimate: the unit is
+    // stated (bytes), so no guess remains. The expected value comes from the model
+    // rather than a hand-typed constant, so the two cannot drift apart.
+    const img = try imageWithSize(&.{
+        movImm(2, accel_data_base),
+        accelWord(0x82, 1, 2, 0, 0, 12), // codec.fnv1a R1, R2, count=12
+        encode(0x01, 0, 0, 0),
+    }, accel_image_size);
+    defer testing.allocator.free(img);
+    @memcpy(img[accel_data_base..][0..12], "hello, celer");
+
+    var vm = Vm.init(img);
+    _ = try vm.run(100);
+    try testing.expectEqual(codec_model.fnv1a("hello, celer"), vm.regs.read(1));
+}
+
+test "codec.fnv1a hashes ONLY the counted range: a longer buffer changes nothing" {
+    // Load-bearing for the UNIT decision. If `count` were read as elements, or
+    // ignored in favour of "the rest of memory", these two runs would differ.
+    const bytes = "abcdef";
+    const with_tail = try imageWithSize(&.{
+        movImm(2, accel_data_base),
+        accelWord(0x82, 1, 2, 0, 0, 3), // only the first three bytes
+        encode(0x01, 0, 0, 0),
+    }, accel_image_size);
+    defer testing.allocator.free(with_tail);
+    @memcpy(with_tail[accel_data_base..][0..6], bytes);
+
+    const without_tail = try imageWithSize(&.{
+        movImm(2, accel_data_base),
+        accelWord(0x82, 1, 2, 0, 0, 3),
+        encode(0x01, 0, 0, 0),
+    }, accel_image_size);
+    defer testing.allocator.free(without_tail);
+    @memcpy(without_tail[accel_data_base..][0..3], "abc");
+
+    var a = Vm.init(with_tail);
+    _ = try a.run(100);
+    var b = Vm.init(without_tail);
+    _ = try b.run(100);
+    try testing.expectEqual(a.regs.read(1), b.regs.read(1));
+    try testing.expectEqual(codec_model.fnv1a("abc"), a.regs.read(1));
+}
+
+test "codec.checksum16 EXECUTES and zero-extends its 16-bit result" {
+    const img = try imageWithSize(&.{
+        movImm(2, accel_data_base),
+        accelWord(0x83, 1, 2, 0, 0, 8),
+        encode(0x01, 0, 0, 0),
+    }, accel_image_size);
+    defer testing.allocator.free(img);
+    @memcpy(img[accel_data_base..][0..8], "abcdefgh");
+
+    var vm = Vm.init(img);
+    _ = try vm.run(100);
+    const expected = codec_model.checksum16("abcdefgh");
+    try testing.expectEqual(@as(u64, expected), vm.regs.read(1));
+    try testing.expect(vm.regs.read(1) <= 0xFFFF); // zero-extended, not sign-extended
+}
+
+test "codec.compress EXECUTES into the normative fixed workspace" {
+    const img = try imageWithSize(&.{
+        movImm(2, accel_data_base),
+        accelWord(0x80, 1, 2, 0, 0, 32),
+        encode(0x01, 0, 0, 0),
+    }, accel_image_size);
+    defer testing.allocator.free(img);
+    const input = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    @memcpy(img[accel_data_base..][0..input.len], input);
+
+    var vm = Vm.init(img);
+    _ = try vm.run(100);
+    const clen: usize = @intCast(vm.regs.read(1));
+    try testing.expect(clen > 0 and clen <= Vm.codec_workspace_len);
+    // The workspace must hold a stream that decompresses back to the input — the
+    // only way to show the bytes landed where the contract says they land.
+    var out: [64]u8 = undefined;
+    const olen = try codec_model.decompress(img[@intCast(Vm.codec_workspace)..][0..clen], &out);
+    try testing.expectEqualStrings(input, out[0..olen]);
+}
+
+test "matrix.det EXECUTES: matrix at rs1, order in rs3, result into rd" {
+    // [[2,1],[1,3]] has determinant 5. The result is written by BIT
+    // REINTERPRETATION (rule E.2) — not converted to an integer.
+    const img = try imageWithSize(&.{
+        movImm(1, accel_data_base),
+        accelWord(0x60, 2, 1, 0, 2, 0), // matrix.det R2, R1, rs3=2
+        encode(0x01, 0, 0, 0),
+    }, accel_image_size);
+    defer testing.allocator.free(img);
+    putF64(img, accel_data_base, 2);
+    putF64(img, accel_data_base + 8, 1);
+    putF64(img, accel_data_base + 16, 1);
+    putF64(img, accel_data_base + 24, 3);
+
+    var vm = Vm.init(img);
+    _ = try vm.run(100);
+    try testing.expectEqual(@as(f64, 5), @as(f64, @bitCast(vm.regs.read(2))));
+}
+
+test "matrix.det's order really comes from rs3: the same matrix reads differently at n=3" {
+    // Falsifies "n is a constant" and "n comes from count". A 3x3 view over the same
+    // four values plus two adjacent zeros is singular, so the determinant is 0 while
+    // the 2x2 reading is 5.
+    const img = try imageWithSize(&.{
+        movImm(1, accel_data_base),
+        accelWord(0x60, 2, 1, 0, 3, 0), // rs3 = 3
+        encode(0x01, 0, 0, 0),
+    }, accel_image_size);
+    defer testing.allocator.free(img);
+    putF64(img, accel_data_base, 2);
+    putF64(img, accel_data_base + 8, 1);
+    putF64(img, accel_data_base + 16, 1);
+    putF64(img, accel_data_base + 24, 3);
+    // bytes 32..72 stay zero, making the third row and column zero -> singular.
+
+    var vm = Vm.init(img);
+    _ = try vm.run(100);
+    try testing.expectEqual(@as(f64, 0), @as(f64, @bitCast(vm.regs.read(2))));
+}
+
+test "matrix.invert EXECUTES: input at rs1, output at rd, order in rs2" {
+    const img = try imageWithSize(&.{
+        movImm(1, accel_data_base),
+        movImm(3, accel_data_base + 0x100),
+        accelWord(0x61, 3, 1, 2, 0, 0), // matrix.invert R3, R1, rs2=2
+        encode(0x01, 0, 0, 0),
+    }, accel_image_size);
+    defer testing.allocator.free(img);
+    const out_addr = accel_data_base + 0x100;
+    for ([_]f64{ 4, 7, 2, 6 }, 0..) |v, i| putF64(img, accel_data_base + i * 8, v);
+
+    var vm = Vm.init(img);
+    _ = try vm.run(100);
+    // [[4,7],[2,6]]^-1 = [[0.6,-0.7],[-0.2,0.4]]
+    try testing.expectApproxEqAbs(@as(f64, 0.6), getF64(img, out_addr), 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, -0.7), getF64(img, out_addr + 8), 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, -0.2), getF64(img, out_addr + 16), 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, 0.4), getF64(img, out_addr + 24), 1e-12);
+}
+
+test "matrix.transform EXECUTES with the rigid-body m at rs2's address" {
+    // A pure translation by (10, 20, 30). The three streams are consecutive f64
+    // arrays from rs1; count is elements PER STREAM — the unit F36 said was missing.
+    const xs = accel_data_base;
+    const m_addr = accel_data_base + 0x800;
+    const img = try imageWithSize(&.{
+        movImm(1, xs),
+        movImm(2, m_addr),
+        accelWord(0x63, 3, 1, 2, 0, 2), // matrix.transform R3, R1, R2, count=2
+        encode(0x01, 0, 0, 0),
+    }, accel_image_size);
+    defer testing.allocator.free(img);
+    putF64(img, xs, 1);
+    putF64(img, xs + 8, 2);
+    putF64(img, xs + 16, 100); // ys[0]
+    putF64(img, xs + 24, 200); // ys[1]
+    putF64(img, xs + 32, 1000); // zs[0]
+    putF64(img, xs + 40, 2000); // zs[1]
+    const m = [16]f64{ 1, 0, 0, 10, 0, 1, 0, 20, 0, 0, 1, 30, 0, 0, 0, 1 };
+    for (m, 0..) |v, i| putF64(img, m_addr + i * 8, v);
+
+    var vm = Vm.init(img);
+    _ = try vm.run(100);
+    try testing.expectEqual(@as(f64, 11), getF64(img, xs));
+    try testing.expectEqual(@as(f64, 12), getF64(img, xs + 8));
+    try testing.expectEqual(@as(f64, 120), getF64(img, xs + 16));
+    try testing.expectEqual(@as(f64, 220), getF64(img, xs + 24));
+    try testing.expectEqual(@as(f64, 1030), getF64(img, xs + 32));
+    try testing.expectEqual(@as(f64, 2030), getF64(img, xs + 40));
+    try testing.expectEqual(@as(u64, 2), vm.regs.read(3)); // per-stream count reported
+}
+
+test "matrix.identity EXECUTES: output at rd, order in rs1, and REALLY writes memory" {
+    // Sentinels first, so a no-op cannot pass this. The 2x2 identity must overwrite
+    // all four f64 slots — the assertion the Lead asked for: an identity matrix
+    // actually written to memory, not a program that merely assembles.
+    const img = try imageWithSize(&.{
+        movImm(1, accel_data_base),
+        movImm(2, 2), // the order
+        accelWord(0x64, 1, 2, 0, 0, 0), // matrix.identity R1, rs1=R2
+        encode(0x01, 0, 0, 0),
+    }, accel_image_size);
+    defer testing.allocator.free(img);
+    putF64(img, accel_data_base, 7.5);
+    putF64(img, accel_data_base + 8, 7.5);
+    putF64(img, accel_data_base + 16, 7.5);
+    putF64(img, accel_data_base + 24, 7.5);
+
+    var vm = Vm.init(img);
+    _ = try vm.run(100);
+    try testing.expect(vm.halted);
+    try testing.expectEqual(@as(f64, 1), getF64(img, accel_data_base));
+    try testing.expectEqual(@as(f64, 0), getF64(img, accel_data_base + 8));
+    try testing.expectEqual(@as(f64, 0), getF64(img, accel_data_base + 16));
+    try testing.expectEqual(@as(f64, 1), getF64(img, accel_data_base + 24));
+    // One byte past the 2x2 block is untouched, so the write is bounded.
+    try testing.expectEqual(@as(f64, 0), getF64(img, accel_data_base + 32));
+}
+
+test "matrix.identity with a zero order writes nothing and is not an error" {
+    // The one row where 0 is a meaningful value rather than a missing length. Without
+    // this positive control, rule D's "count = 0 is an error" could be implemented as
+    // "always refuse 0" and the distinction would be untested.
+    const img = try imageWithSize(&.{
+        movImm(1, accel_data_base),
+        accelWord(0x64, 1, 0, 0, 0, 0), // rs1 = 0
+        encode(0x01, 0, 0, 0),
+    }, accel_image_size);
+    defer testing.allocator.free(img);
+    putF64(img, accel_data_base, 7.5); // sentinel: must survive
+
+    var vm = Vm.init(img);
+    _ = try vm.run(100);
+    try testing.expect(vm.halted);
+    try testing.expectEqual(@as(f64, 7.5), getF64(img, accel_data_base));
+}
+
+test "fft.forward EXECUTES on complex elements and matches the independent DFT" {
+    // count is COMPLEX elements (16 bytes each) — the unit F36 flagged as undefined,
+    // where a byte reading would differ by 16x. The reference is `naiveDft`, which
+    // shares no code with the fast path, so this cannot pass on a consistent bug.
+    const base = accel_data_base;
+    const img = try imageWithSize(&.{
+        movImm(1, base),
+        accelWord(0x70, 2, 1, 0, 0, 4), // fft.forward R2, R1, count=4
+        encode(0x01, 0, 0, 0),
+    }, accel_image_size);
+    defer testing.allocator.free(img);
+    const original = [4]fft_model.Complex{
+        .{ .re = 1, .im = 0 },
+        .{ .re = 2, .im = -1 },
+        .{ .re = 0, .im = 3 },
+        .{ .re = -4, .im = 0.5 },
     };
-    for (words) |w| {
-        const img = try imageWith(&.{w});
-        defer testing.allocator.free(img);
+    for (original, 0..) |c, i| {
+        putF64(img, base + i * 16, c.re);
+        putF64(img, base + i * 16 + 8, c.im);
+    }
 
-        var vm = Vm.init(img);
-        const s = try vm.step();
-        try testing.expect(s == .fault); // refused, never executed
+    var vm = Vm.init(img);
+    _ = try vm.run(100);
+    var expect: [4]fft_model.Complex = undefined;
+    try fft_model.naiveDft(&original, &expect);
+    var i: usize = 0;
+    while (i < 4) : (i += 1) {
+        try testing.expectApproxEqAbs(expect[i].re, getF64(img, base + i * 16), 1e-9);
+        try testing.expectApproxEqAbs(expect[i].im, getF64(img, base + i * 16 + 8), 1e-9);
+    }
+    try testing.expectEqual(@as(u64, 4), vm.regs.read(2));
+}
 
-        var buf: [2048]u8 = undefined;
-        const text = diagnostics.renderToBuffer(s.fault, &buf);
-        // It says it is an ACCELERATOR instruction, not an unknown opcode.
-        try testing.expect(std.mem.indexOf(u8, text, "accelerator") != null);
-        // It does NOT use the old generic phrasing, which hid which rule is missing.
-        try testing.expect(std.mem.indexOf(u8, text, "not wired into this build yet") == null);
-        // It names the missing rule the reader has to act on: the count's source.
-        try testing.expect(std.mem.indexOf(u8, text, "derive the count from the destination register") != null);
-        try testing.expect(std.mem.indexOf(u8, text, "F36") != null);
-        // Plain language, per §4.2 and §7.
-        try testing.expect(!diagnostics.hasBareHexCode(text));
+test "fft.forward then fft.inverse restores the input" {
+    const base = accel_data_base;
+    const img = try imageWithSize(&.{
+        movImm(1, base),
+        accelWord(0x70, 2, 1, 0, 0, 4),
+        accelWord(0x71, 3, 1, 0, 0, 4),
+        encode(0x01, 0, 0, 0),
+    }, accel_image_size);
+    defer testing.allocator.free(img);
+    const original = [4]fft_model.Complex{
+        .{ .re = 1, .im = 0 },
+        .{ .re = 2, .im = -1 },
+        .{ .re = 0, .im = 3 },
+        .{ .re = -4, .im = 0.5 },
+    };
+    for (original, 0..) |c, i| {
+        putF64(img, base + i * 16, c.re);
+        putF64(img, base + i * 16 + 8, c.im);
+    }
+
+    var vm = Vm.init(img);
+    _ = try vm.run(100);
+    var i: usize = 0;
+    while (i < 4) : (i += 1) {
+        try testing.expectApproxEqAbs(original[i].re, getF64(img, base + i * 16), 1e-9);
+        try testing.expectApproxEqAbs(original[i].im, getF64(img, base + i * 16 + 8), 1e-9);
     }
 }
 
-test "each §3.6 refusal names its OWN mnemonic, not a neighbour's" {
-    // A refusal that says "an accelerator operation" for all thirteen is only
-    // marginally better than the old arm. The name comes from the §3.6 registry,
-    // so this also catches the registry and the decoder drifting apart.
+test "fft.ntt EXECUTES over u64 elements" {
+    const base = accel_data_base;
+    const img = try imageWithSize(&.{
+        movImm(1, base),
+        // rs2 stays zero: this build has one fixed modulus (rule E.6)
+        accelWord(0x72, 3, 1, 0, 0, 4), // fft.ntt R3, R1, count=4
+        encode(0x01, 0, 0, 0),
+    }, accel_image_size);
+    defer testing.allocator.free(img);
+    const data_in = [4]u64{ 1, 2, 3, 4 };
+    for (data_in, 0..) |v, i| putU64(img, base + i * 8, v);
+
+    var vm = Vm.init(img);
+    _ = try vm.run(100);
+    var expect = data_in;
+    try fft_model.ntt(&expect, false);
+    for (expect, 0..) |v, i| try testing.expectEqual(v, getU64(img, base + i * 8));
+}
+
+test "a u64 count on fft.ntt is ELEMENTS, not bytes: count=4 reads 32 bytes" {
+    // Pins the unit the amendment chose for 0x72/0x73. A byte reading would consume
+    // 4 bytes and leave the fourth element untouched.
+    const base = accel_data_base;
+    const img = try imageWithSize(&.{
+        movImm(1, base),
+        // rs2 stays zero: this build has one fixed modulus (rule E.6)
+        accelWord(0x72, 3, 1, 2, 0, 4),
+        encode(0x01, 0, 0, 0),
+    }, accel_image_size);
+    defer testing.allocator.free(img);
+    for ([_]u64{ 1, 2, 3, 4 }, 0..) |v, i| putU64(img, base + i * 8, v);
+
+    var vm = Vm.init(img);
+    _ = try vm.run(100);
+    // All 32 bytes participate: the fourth residue is no longer its input value.
+    try testing.expect(getU64(img, base + 24) != 4);
+}
+
+// -- refusals ----------------------------------------------------------------
+
+test "count = 0 is REFUSED on every row that needs a length" {
+    // Amendment 1.18 rule D. §3.6 line 490's "derive the count from the destination
+    // register" is superseded: a zero count is a diagnostic error, not a licence to
+    // read `rd` as an input length. `matrix.identity` is the one row exempted, and
+    // the test after this one is its positive control.
     const cases = [_]struct { op: u8, name: []const u8 }{
-        .{ .op = 0x60, .name = "matrix.det" },
-        .{ .op = 0x61, .name = "matrix.invert" },
-        .{ .op = 0x62, .name = "matrix.mul" },
         .{ .op = 0x63, .name = "matrix.transform" },
-        .{ .op = 0x64, .name = "matrix.identity" },
         .{ .op = 0x70, .name = "fft.forward" },
         .{ .op = 0x71, .name = "fft.inverse" },
         .{ .op = 0x72, .name = "fft.ntt" },
         .{ .op = 0x73, .name = "fft.ntt.inverse" },
         .{ .op = 0x80, .name = "codec.compress" },
-        .{ .op = 0x81, .name = "codec.decompress" },
         .{ .op = 0x82, .name = "codec.fnv1a" },
         .{ .op = 0x83, .name = "codec.checksum16" },
     };
     for (cases) |c| {
-        const img = try imageWith(&.{accelWord(c.op, 1, 2, 0, 0, 8)});
+        const img = try imageWith(&.{accelWord(c.op, 1, 2, 3, 0, 0)});
         defer testing.allocator.free(img);
-
         var vm = Vm.init(img);
         const s = try vm.step();
         try testing.expect(s == .fault);
-
         var buf: [2048]u8 = undefined;
         const text = diagnostics.renderToBuffer(s.fault, &buf);
         try testing.expect(std.mem.indexOf(u8, text, c.name) != null);
+        try testing.expect(std.mem.indexOf(u8, text, "zero count") != null);
+        // Nothing was committed, and the count register was NOT read as a length.
+        try testing.expectEqual(@as(u64, 0), vm.retired);
+        try testing.expectEqual(@as(u64, 0), vm.regs.pc);
+        try testing.expect(!diagnostics.hasBareHexCode(text));
     }
 }
 
-test "a REFUSED accelerator retires nothing and writes no register" {
-    // The load-bearing property. A refusal that had already committed a value to rd
-    // would be worse than no implementation: the program would carry on with a
-    // fabricated number. Nothing may be committed, including the count register.
-    const img = try imageWith(&.{
-        encode(0x19, 2, 0, aluOperand(0, .full, 0x1234)), // R2 = the input register
-        accelWord(0x82, 1, 2, 0, 0, 8), // codec.fnv1a R1, R2
-        encode(0x01, 0, 0, 0), // halt (never reached)
-    });
+test "count = 0 is refused even when rd holds a plausible length" {
+    // The rejected alternative, tested directly. The old rule would have read `rd`
+    // as the count; a program that pre-loads its result register with a length must
+    // NOT get a silently different computation. With rd = 8, a count-reading
+    // implementation would hash 8 bytes and succeed — this asserts it refuses.
+    const img = try imageWithSize(&.{
+        movImm(2, accel_data_base), // source address
+        movImm(1, 8), // rd pre-loaded with a length, which 1.18 does NOT read
+        accelWord(0x82, 1, 2, 0, 0, 0), // codec.fnv1a R1, R2 (no count written)
+        encode(0x01, 0, 0, 0),
+    }, accel_image_size);
     defer testing.allocator.free(img);
-
-    var vm = Vm.init(img);
-    _ = try vm.step(); // mov
-    try testing.expectEqual(@as(u64, 1), vm.retired);
-
-    const before = vm.snapshot();
-    const s = try vm.step();
-    try testing.expect(s == .fault);
-
-    // rd was NOT written with a fabricated hash.
-    try testing.expectEqual(@as(u64, 0), vm.regs.read(1));
-    // The source register still holds what the program put there.
-    try testing.expectEqual(@as(u64, 0x1234), vm.regs.read(2));
-    // PC did not advance past the refused instruction.
-    try testing.expectEqual(@as(u64, 8), vm.regs.pc);
-    // Retired count unchanged: the instruction did not retire.
-    try testing.expectEqual(@as(u64, 1), vm.retired);
-    // And memory is byte-for-byte untouched.
-    try testing.expectEqual(before.mem_hash, vm.snapshot().mem_hash);
-    try testing.expect(before.mem_len == vm.snapshot().mem_len);
-    try testing.expect(vm.halted);
-}
-
-test "the refusal is exactly as long as it needs to be: it names WHICH rule is missing" {
-    // The Lead's requirement: the reader should learn that the contract lacks a
-    // count source and a dimension, not merely that the VM did not do it. This
-    // asserts the actionable content, so a future edit that shortens the sentence
-    // back to "not implemented" fails here.
-    const img = try imageWith(&.{accelWord(0x60, 1, 2, 0, 0, 0)}); // matrix.det R1, R2
-    defer testing.allocator.free(img);
-
-    var vm = Vm.init(img);
-    const s = try vm.step();
-    try testing.expect(s == .fault);
-
-    var buf: [2048]u8 = undefined;
-    const text = diagnostics.renderToBuffer(s.fault, &buf);
-    // Names the operands it read, as INFORMATION, so the user can find the word.
-    try testing.expect(std.mem.indexOf(u8, text, "destination register 1") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "first source register 2") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "count field 0") != null);
-    // States the gap in the contract, which is the actionable part.
-    try testing.expect(std.mem.indexOf(u8, text, "3.6") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "dimension") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "F36") != null);
-    // And it is prose: no bare hex code anywhere in it.
-    try testing.expect(!diagnostics.hasBareHexCode(text));
-}
-
-test "the refusal FITS the CLI's 1024-byte render buffer, so it cannot be cut mid-sentence" {
-    // Regression for a real defect the unit tests missed and the Lead found by
-    // running the CLI: main.zig:379 renders into a fixed [1024]u8 and swallows the
-    // overflow with `catch {}`, so an over-long diagnostic is silently TRUNCATED —
-    // the reader gets a sentence that looks finished but is not. The original text
-    // here was ~1000 bytes and was cut mid-word at "docs/".
-    //
-    // This asserts the property directly rather than eyeballing the length: render
-    // into exactly the CLI's buffer size and require the result to be a complete
-    // sentence ending in a period, with no room needed beyond that buffer.
-    const img = try imageWith(&.{accelWord(0x60, 1, 2, 0, 0, 0)});
-    defer testing.allocator.free(img);
-    var vm = Vm.init(img);
-    const s = try vm.step();
-    try testing.expect(s == .fault);
-
-    // 1024 is main.zig's buffer. A rendered diagnostic must fit it with room to
-    // spare, so a later wording tweak cannot silently re-introduce truncation.
-    var cli_buf: [1024]u8 = undefined;
-    var w = std.Io.Writer.fixed(&cli_buf);
-    s.fault.render(&w) catch return error.DiagnosticExceedsCliBuffer;
-    const text = w.buffered();
-
-    try testing.expect(std.mem.endsWith(u8, text, "."));
-    try testing.expect(std.mem.indexOf(u8, text, "F36") != null);
-    // Comfortably inside the budget, not merely at the edge of it.
-    try testing.expect(text.len < 900);
-}
-
-test "a well-formed accelerator instruction is not told its operands are invalid" {
-    // Regression for the second defect the Lead found: routing the register/count
-    // facts through `.operand` made the renderer append "which is not valid here",
-    // telling the reader to fix an instruction that is not broken. `matrix.det R1,
-    // R2` is well-formed; only its SEMANTICS are undefined by the contract.
-    const img = try imageWith(&.{accelWord(0x60, 1, 2, 0, 0, 0)});
-    defer testing.allocator.free(img);
-    var vm = Vm.init(img);
-    const s = try vm.step();
-    try testing.expect(s == .fault);
-
-    var buf: [2048]u8 = undefined;
-    const text = diagnostics.renderToBuffer(s.fault, &buf);
-    try testing.expect(std.mem.indexOf(u8, text, "which is not valid here") == null);
-    try testing.expect(std.mem.indexOf(u8, text, "is missing") == null);
-    // The mnemonic is still named, which is what makes the refusal actionable.
-    try testing.expect(std.mem.indexOf(u8, text, "matrix.det") != null);
-}
-test "a RESERVED §3.6 byte refuses DIFFERENTLY from a defined-but-unexecutable one" {
-    // 0x6F has no §3.6 row and is reserved; 0x60 is matrix.det and is defined.
-    // The Lead's requirement: these are different findings and must not read the
-    // same.
-    //
-    // CONTRADICTS THE TASK BRIEF, and reported to the Lead: the brief says a
-    // reserved byte "must keep hitting the fault path" as though the DECODER
-    // rejects it. It does not. `decoder.decode` accepts every byte in 0x60-0x8F
-    // as `.accelerator` (decoder.zig:469-485 has no table lookup); only a
-    // non-zero `reserved[39:32]` is rejected, at decoder.zig:472-475. So 0x6F
-    // reaches this arm too, and the distinction has to be made HERE, by looking
-    // the opcode up in the §3.6 registry. That is what this test pins: the two
-    // produce visibly different sentences even though both arrive by the same
-    // path.
-    const reserved = try imageWith(&.{accelWord(0x6F, 1, 2, 0, 0, 0)});
-    defer testing.allocator.free(reserved);
-    var a = Vm.init(reserved);
-    const sa = try a.step();
-    try testing.expect(sa == .fault);
-
-    const defined = try imageWith(&.{accelWord(0x60, 1, 2, 0, 0, 0)});
-    defer testing.allocator.free(defined);
-    var b = Vm.init(defined);
-    const sb = try b.step();
-    try testing.expect(sb == .fault);
-
-    var buf_a: [2048]u8 = undefined;
-    var buf_b: [2048]u8 = undefined;
-    const text_a = diagnostics.renderToBuffer(sa.fault, &buf_a);
-    const text_b = diagnostics.renderToBuffer(sb.fault, &buf_b);
-
-    // The reserved byte is NOT named — the registry has no row for it — and the
-    // sentence says so instead of inventing a mnemonic or borrowing a neighbour's.
-    try testing.expect(std.mem.indexOf(u8, text_a, "does not list") != null);
-    try testing.expect(std.mem.indexOf(u8, text_a, "matrix.det") == null);
-    // The defined byte IS named, and its refusal points at the F36 gap.
-    try testing.expect(std.mem.indexOf(u8, text_b, "matrix.det") != null);
-    try testing.expect(std.mem.indexOf(u8, text_b, "F36") != null);
-    try testing.expect(std.mem.indexOf(u8, text_b, "does not list") == null);
-    // The two sentences are genuinely different, so a reader can tell which
-    // finding they are looking at.
-    try testing.expect(!std.mem.eql(u8, text_a, text_b));
-    // Neither reinterprets the reserved byte as a neighbouring operation, and
-    // neither is a bare code.
-    try testing.expect(!diagnostics.hasBareHexCode(text_a));
-    try testing.expect(!diagnostics.hasBareHexCode(text_b));
-}
-
-test "the reserved and defined paths both retire nothing and write nothing" {
-    // Whichever of the two faults a caller hits, the machine must not have
-    // committed a value: a reserved byte must not acquire a neighbour's result
-    // by accident.
-    const img = try imageWith(&.{
-        encode(0x19, 1, 0, aluOperand(0, .full, 0x99)), // R1 = 0x99
-        accelWord(0x6F, 2, 1, 0, 0, 0), // reserved 0x6F, rd = R2
-    });
-    defer testing.allocator.free(img);
+    @memcpy(img[accel_data_base..][0..8], "12345678");
 
     var vm = Vm.init(img);
     _ = try vm.step();
+    _ = try vm.step();
     const s = try vm.step();
     try testing.expect(s == .fault);
-    try testing.expectEqual(@as(u64, 0), vm.regs.read(2)); // no fabricated result
-    try testing.expectEqual(@as(u64, 1), vm.retired); // the refused word did not retire
-    try testing.expectEqual(@as(u64, 8), vm.regs.pc); // PC did not advance past it
+    try testing.expectEqual(@as(u64, 8), vm.regs.read(1)); // rd untouched
 }
 
-test "the accelerator arm does not disturb the instructions around it" {
-    // The `else` arm this replaces was the catch-all; removing it must not shift
-    // behaviour for the cap.* refusals that sit immediately above it.
-    const img = try imageWith(&.{
-        accelWord(0x64, 1, 0, 0, 0, 2), // matrix.identity R1, count=2 — refused
-    });
+test "matrix.identity does NOT read count as its order: a non-zero count is refused" {
+    // Pins the row's stated source. `count=N` is accepted by the ASSEMBLER for this
+    // row (it takes_count), but the order comes from rs1, so a word carrying a
+    // non-zero count would otherwise be ambiguous about which one wins. It refuses.
+    const img = try imageWith(&.{accelWord(0x64, 1, 2, 0, 0, 2)});
     defer testing.allocator.free(img);
     var vm = Vm.init(img);
     const s = try vm.step();
@@ -2043,16 +2567,357 @@ test "the accelerator arm does not disturb the instructions around it" {
     var buf: [2048]u8 = undefined;
     const text = diagnostics.renderToBuffer(s.fault, &buf);
     try testing.expect(std.mem.indexOf(u8, text, "matrix.identity") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "first source register") != null);
+}
 
-    // cap.check's own refusal still reads as a capability diagnostic, not an
-    // accelerator one: the new arm is scoped to `.accelerator` only.
-    const cap = try imageWith(&.{encode(0x52, 0, 4, 0)});
-    defer testing.allocator.free(cap);
-    var c = Vm.init(cap);
-    const sc = try c.step();
-    try testing.expect(sc == .fault);
+test "a MISALIGNED f64 address refuses with a sentence instead of panicking" {
+    // F36's alignment trap. The models take []f64 and mem.bytes' base alignment is
+    // NOT guaranteed (Vm.init accepts any []u8; tests use testing.allocator), so an
+    // @alignCast on this address would panic. The check must be a refusal.
+    const img = try imageWith(&.{
+        movImm(1, 0x1002), // 8-aligned? no: 0x1002 % 8 == 2
+        accelWord(0x64, 1, 2, 0, 0, 0), // matrix.identity R1, rs1=2
+    });
+    defer testing.allocator.free(img);
+    var vm = Vm.init(img);
+    _ = try vm.step();
+    const s = try vm.step();
+    try testing.expect(s == .fault);
+    var buf: [2048]u8 = undefined;
+    const text = diagnostics.renderToBuffer(s.fault, &buf);
+    try testing.expect(std.mem.indexOf(u8, text, "multiple of 8 bytes") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "matrix.identity") != null);
+    try testing.expect(!diagnostics.hasBareHexCode(text));
+    try testing.expectEqual(@as(u64, 1), vm.retired); // the refused word did not retire
+}
+
+test "an fft address that is 8-aligned but NOT 16-aligned refuses" {
+    // Complex is 16 bytes, so its requirement is 16. An 8-byte check would accept
+    // this word and reinterpret two complexes from the middle of one — a silent
+    // wrong answer, which is what rule E.3 exists to prevent.
+    const img = try imageWith(&.{
+        movImm(1, 0x1008),
+        accelWord(0x70, 2, 1, 0, 0, 4),
+    });
+    defer testing.allocator.free(img);
+    var vm = Vm.init(img);
+    _ = try vm.step();
+    const s = try vm.step();
+    try testing.expect(s == .fault);
+    var buf: [2048]u8 = undefined;
+    const text = diagnostics.renderToBuffer(s.fault, &buf);
+    try testing.expect(std.mem.indexOf(u8, text, "multiple of 16 bytes") != null);
+}
+
+test "an out-of-bounds accelerator range refuses, NAMING the address and the length" {
+    // Rule E.3 requires the sentence to name both, and the refusal must precede any
+    // byte being touched. The image here is exactly `imageWith`'s program-sized
+    // buffer, so a 1 MiB read cannot fit.
+    const img = try imageWithSize(&.{
+        movImm(1, 0x40),
+        accelWord(0x82, 2, 1, 0, 0, 1 << 20), // codec.fnv1a over 1 MiB
+    }, 0x100);
+    defer testing.allocator.free(img);
+    var vm = Vm.init(img);
+    const before = vm.snapshot();
+    _ = try vm.step();
+    const s = try vm.step();
+    try testing.expect(s == .fault);
+    var buf: [2048]u8 = undefined;
+    const text = diagnostics.renderToBuffer(s.fault, &buf);
+    try testing.expect(std.mem.indexOf(u8, text, "64") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "1048576") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "256 bytes long") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "codec.fnv1a") != null);
+    try testing.expect(!diagnostics.hasBareHexCode(text));
+    // Nothing partially applied: memory byte-identical, nothing retired.
+    try testing.expectEqual(before.mem_hash, vm.snapshot().mem_hash);
+    try testing.expectEqual(@as(u64, 1), vm.retired);
+    // And the sentence fits the CLI's 1024-byte buffer with room to spare.
+    var cli_buf: [1024]u8 = undefined;
+    var w = std.Io.Writer.fixed(&cli_buf);
+    s.fault.render(&w) catch return error.DiagnosticExceedsCliBuffer;
+    try testing.expect(std.mem.endsWith(u8, w.buffered(), "."));
+    try testing.expect(w.buffered().len < 900);
+}
+
+test "an address that overflows when the length is added still refuses" {
+    // `addr +| len` saturates, so an address near the top of the range cannot wrap
+    // into a small in-bounds window. This is the arithmetic-bug guard for rule E.3.
+    const img = try imageWith(&.{
+        movImm(1, std.math.maxInt(u64) - 4),
+        accelWord(0x82, 2, 1, 0, 0, 4096),
+    });
+    defer testing.allocator.free(img);
+    var vm = Vm.init(img);
+    _ = try vm.step();
+    const s = try vm.step();
+    try testing.expect(s == .fault);
+}
+
+test "a non-zero unused operand field is REFUSED, not silently ignored" {
+    // Rule E. `fft.ntt` does not use rs3; a word that sets it must not compute the
+    // same thing as one that leaves it zero, or the extra register carries a meaning
+    // the operation does not have.
+    const img = try imageWith(&.{
+        movImm(1, 0x1000),
+        accelWord(0x72, 3, 1, 0, 5, 4), // rs3 = 5, unused
+    });
+    defer testing.allocator.free(img);
+    var vm = Vm.init(img);
+    _ = try vm.step();
+    const s = try vm.step();
+    try testing.expect(s == .fault);
+    var buf: [2048]u8 = undefined;
+    const text = diagnostics.renderToBuffer(s.fault, &buf);
+    try testing.expect(std.mem.indexOf(u8, text, "third source register") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "must be zero") != null);
+}
+
+test "fft.ntt refuses a non-zero modulus register instead of ignoring it" {
+    // Rule E.6. Validating a modulus and then computing with a different constant is
+    // the F34 "validated but dropped" class, so a non-zero rs2 is a refusal.
+    const img = try imageWithSize(&.{
+        movImm(1, accel_data_base),
+        movImm(2, 17),
+        accelWord(0x72, 3, 1, 2, 0, 4),
+    }, accel_image_size);
+    defer testing.allocator.free(img);
+    var vm = Vm.init(img);
+    _ = try vm.step();
+    _ = try vm.step();
+    const s = try vm.step();
+    try testing.expect(s == .fault);
+    var buf: [2048]u8 = undefined;
+    const text = diagnostics.renderToBuffer(s.fault, &buf);
+    try testing.expect(std.mem.indexOf(u8, text, "fft.ntt") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "modulus") != null);
+    try testing.expect(!diagnostics.hasBareHexCode(text));
+}
+
+test "a non-power-of-two fft length reaches the model and refuses in plain language" {
+    const img = try imageWithSize(&.{
+        movImm(1, 0x1000),
+        accelWord(0x70, 2, 1, 0, 0, 3), // 3 is not a power of two
+    }, 0x2000);
+    defer testing.allocator.free(img);
+    var vm = Vm.init(img);
+    _ = try vm.step();
+    const s = try vm.step();
+    try testing.expect(s == .fault);
+    var buf: [2048]u8 = undefined;
+    const text = diagnostics.renderToBuffer(s.fault, &buf);
+    try testing.expect(std.mem.indexOf(u8, text, "fft.forward") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "not a power of two") != null);
+    try testing.expect(!diagnostics.hasBareHexCode(text));
+}
+
+test "matrix.invert refuses a SINGULAR matrix in plain language" {
+    const img = try imageWithSize(&.{
+        movImm(1, accel_data_base),
+        movImm(3, accel_data_base + 0x100),
+        accelWord(0x61, 3, 1, 2, 0, 0),
+    }, accel_image_size);
+    defer testing.allocator.free(img);
+    // [[1,2],[2,4]] is singular.
+    for ([_]f64{ 1, 2, 2, 4 }, 0..) |v, i| putF64(img, accel_data_base + i * 8, v);
+
+    var vm = Vm.init(img);
+    _ = try vm.step();
+    _ = try vm.step();
+    const s = try vm.step();
+    try testing.expect(s == .fault);
+    var buf: [2048]u8 = undefined;
+    const text = diagnostics.renderToBuffer(s.fault, &buf);
+    try testing.expect(std.mem.indexOf(u8, text, "matrix.invert") != null);
+    try testing.expect(!diagnostics.hasBareHexCode(text));
+}
+
+test "codec.decompress STILL REFUSES, and says why it is not a missing constant" {
+    // The one §3.6 row that remains refused for a bound reason. This test exists so a
+    // future "finish the accelerators" pass cannot wire it by reusing compress's
+    // workspace and silently narrowing the operation's domain.
+    const img = try imageWith(&.{accelWord(0x81, 1, 2, 0, 0, 8)});
+    defer testing.allocator.free(img);
+    var vm = Vm.init(img);
+    const s = try vm.step();
+    try testing.expect(s == .fault);
+    var buf: [2048]u8 = undefined;
+    const text = diagnostics.renderToBuffer(s.fault, &buf);
+    try testing.expect(std.mem.indexOf(u8, text, "codec.decompress") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "256") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "E.1") != null);
+    try testing.expect(!diagnostics.hasBareHexCode(text));
+}
+
+test "matrix.mul STILL REFUSES, because five inputs do not fit four fields" {
+    // A genuine field shortage, not a missing constant. The refusal must say so, so
+    // the next reader does not re-derive it or "fix" it by inventing a fifth field.
+    const img = try imageWith(&.{accelWord(0x62, 1, 2, 3, 4, 0)});
+    defer testing.allocator.free(img);
+    var vm = Vm.init(img);
+    const s = try vm.step();
+    try testing.expect(s == .fault);
+    var buf: [2048]u8 = undefined;
+    const text = diagnostics.renderToBuffer(s.fault, &buf);
+    try testing.expect(std.mem.indexOf(u8, text, "matrix.mul") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "E.5") != null);
+    try testing.expect(!diagnostics.hasBareHexCode(text));
+}
+
+test "a RESERVED §3.6 byte still refuses DIFFERENTLY from a defined one" {
+    // 0x6F has no §3.6 row and is reserved. The distinction between "reserved" and
+    // "defined but refused" is the contract's, and it must survive this change.
+    //
+    // CONTRADICTS THE ORIGINAL TASK BRIEF, and still true: the brief said a reserved
+    // byte "must keep hitting the fault path" as though the DECODER rejected it. It
+    // does not — `decoder.decode` accepts every byte in 0x60-0x8F as `.accelerator`
+    // (decoder.zig:469-485 has no table lookup). So the distinction is made HERE, by
+    // the §3.6 registry lookup. Recorded as F37.
+    const reserved = try imageWith(&.{accelWord(0x6F, 1, 2, 0, 0, 0)});
+    defer testing.allocator.free(reserved);
+    var a = Vm.init(reserved);
+    const sa = try a.step();
+    try testing.expect(sa == .fault);
+    var buf_a: [2048]u8 = undefined;
+    const text_a = diagnostics.renderToBuffer(sa.fault, &buf_a);
+    try testing.expect(std.mem.indexOf(u8, text_a, "does not list") != null);
+    try testing.expect(std.mem.indexOf(u8, text_a, "matrix.det") == null);
+    try testing.expect(!diagnostics.hasBareHexCode(text_a));
+
+    // A defined row that DOES refuse names itself and says why — a different sentence.
+    const refused = try imageWith(&.{accelWord(0x81, 1, 2, 0, 0, 8)});
+    defer testing.allocator.free(refused);
+    var b = Vm.init(refused);
+    const sb = try b.step();
+    try testing.expect(sb == .fault);
+    var buf_b: [2048]u8 = undefined;
+    const text_b = diagnostics.renderToBuffer(sb.fault, &buf_b);
+    try testing.expect(std.mem.indexOf(u8, text_b, "codec.decompress") != null);
+    try testing.expect(std.mem.indexOf(u8, text_b, "does not list") == null);
+    try testing.expect(!std.mem.eql(u8, text_a, text_b));
+}
+
+test "the reserved path retires nothing and writes no register" {
+    const img = try imageWith(&.{
+        movImm(1, 0x99),
+        accelWord(0x6F, 2, 1, 0, 0, 0), // reserved 0x6F, rd = R2
+    });
+    defer testing.allocator.free(img);
+    var vm = Vm.init(img);
+    _ = try vm.step();
+    const s = try vm.step();
+    try testing.expect(s == .fault);
+    try testing.expectEqual(@as(u64, 0), vm.regs.read(2)); // no fabricated result
+    try testing.expectEqual(@as(u64, 1), vm.retired);
+    try testing.expectEqual(@as(u64, 8), vm.regs.pc);
+}
+
+test "an ACCEPTED accelerator commits, and a REFUSED one does not" {
+    // The atomicity property, both directions. Without the positive half, a VM that
+    // refused everything would satisfy the negative half.
+    const accepted = try imageWithSize(&.{
+        movImm(1, accel_data_base),
+        accelWord(0x64, 1, 2, 0, 0, 0), // matrix.identity R1, rs1=2 — valid
+        encode(0x01, 0, 0, 0),
+    }, accel_image_size);
+    defer testing.allocator.free(accepted);
+    var a = Vm.init(accepted);
+    _ = try a.step();
+    const sa = try a.step();
+    try testing.expect(sa == .advanced);
+    try testing.expectEqual(@as(u64, 2), a.retired);
+    try testing.expectEqual(@as(u64, 16), a.regs.pc);
+
+    const refused = try imageWithSize(&.{
+        movImm(1, accel_data_base + 2), // misaligned: refused
+        accelWord(0x64, 1, 2, 0, 0, 0),
+        encode(0x01, 0, 0, 0),
+    }, accel_image_size);
+    defer testing.allocator.free(refused);
+    var b = Vm.init(refused);
+    _ = try b.step();
+    const sb = try b.step();
+    try testing.expect(sb == .fault);
+    try testing.expectEqual(@as(u64, 1), b.retired);
+    try testing.expectEqual(@as(u64, 8), b.regs.pc);
+}
+
+test "the accelerator arm does not disturb the instructions around it" {
+    // The `else` arm it replaced was the catch-all; scoping the new rules to
+    // `.accelerator` must not change `cap.*`'s refusals, which sit immediately above.
+    const img = try imageWithSize(&.{
+        movImm(1, accel_data_base),
+        accelWord(0x60, 2, 1, 0, 2, 0), // matrix.det R2, R1, rs3=2 — executes
+        encode(0x52, 0, 4, 0), // cap.check — refuses on its own rule
+    }, accel_image_size);
+    defer testing.allocator.free(img);
+    var vm = Vm.init(img);
+    _ = try vm.step();
+    const det = try vm.step();
+    try testing.expect(det == .advanced);
+    const cap = try vm.step();
+    try testing.expect(cap == .fault);
     var cbuf: [2048]u8 = undefined;
-    const ctext = diagnostics.renderToBuffer(sc.fault, &cbuf);
+    const ctext = diagnostics.renderToBuffer(cap.fault, &cbuf);
     try testing.expect(std.mem.indexOf(u8, ctext, "capability check") != null);
     try testing.expect(std.mem.indexOf(u8, ctext, "accelerator") == null);
+}
+
+test "codec.compress REFUSES cleanly when the image is too small for the workspace" {
+    // §3.6 rule C's checked precondition. The rule's earlier draft claimed every entry
+    // point allocates 64 KiB; that was false (crossarch's fixture is 4,672 bytes,
+    // examples' is 20,480), so this direction must be a refusal and not a failed
+    // access, a clipped workspace or a relocated one.
+    const img = try imageWithSize(&.{
+        movImm(2, 0x100),
+        accelWord(0x80, 1, 2, 0, 0, 8),
+        encode(0x01, 0, 0, 0),
+    }, 0x1000); // 4096 bytes: far below 65280 + 256
+    defer testing.allocator.free(img);
+    @memcpy(img[0x100..][0..8], "abcdefgh");
+
+    var vm = Vm.init(img);
+    const before = vm.snapshot();
+    _ = try vm.step();
+    const s = try vm.step();
+    try testing.expect(s == .fault);
+    var buf: [2048]u8 = undefined;
+    const text = diagnostics.renderToBuffer(s.fault, &buf);
+    try testing.expect(std.mem.indexOf(u8, text, "codec.compress") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "65280") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "256") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "4096") != null);
+    try testing.expect(!diagnostics.hasBareHexCode(text));
+    // Nothing partially applied.
+    try testing.expectEqual(before.mem_hash, vm.snapshot().mem_hash);
+    try testing.expectEqual(@as(u64, 1), vm.retired);
+    // And the sentence is not truncated by the CLI's 1024-byte buffer.
+    var cli_buf: [1024]u8 = undefined;
+    var w = std.Io.Writer.fixed(&cli_buf);
+    s.fault.render(&w) catch return error.DiagnosticExceedsCliBuffer;
+    try testing.expect(std.mem.endsWith(u8, w.buffered(), "."));
+    try testing.expect(w.buffered().len < 900);
+}
+
+test "codec.compress EXECUTES when the image is large enough for the workspace" {
+    // The other direction of the same precondition. Without this positive control,
+    // "always refuse compress" would satisfy the test above.
+    const big = Vm.codec_workspace + Vm.codec_workspace_len + 64;
+    const img = try imageWithSize(&.{
+        movImm(2, 0x100),
+        accelWord(0x80, 1, 2, 0, 0, 32),
+        encode(0x01, 0, 0, 0),
+    }, @intCast(big));
+    defer testing.allocator.free(img);
+    const input = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    @memcpy(img[0x100..][0..input.len], input);
+
+    var vm = Vm.init(img);
+    _ = try vm.run(100);
+    const clen: usize = @intCast(vm.regs.read(1));
+    try testing.expect(clen > 0 and clen <= Vm.codec_workspace_len);
+    var out: [64]u8 = undefined;
+    const olen = try codec_model.decompress(img[@intCast(Vm.codec_workspace)..][0..clen], &out);
+    try testing.expectEqualStrings(input, out[0..olen]);
 }

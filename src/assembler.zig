@@ -98,15 +98,23 @@ pub const Status = enum(u4) {
     }
 };
 
-/// §3.6 (amendment 1.1) accelerator operations, in opcode order. Each entry names
-/// its operands positionally to match the model signature.
+/// §3.6 (amendment 1.1; operands re-derived by amendment 1.18) accelerator
+/// operations, in opcode order. Each entry names its operands positionally.
+///
+/// The two fields below describe the TEXTUAL form only. Since amendment 1.18, a
+/// `sources` count of 0 does not mean the operation has no register operand — it
+/// means its register does not appear in the source syntax (`matrix.identity`'s
+/// order travels in `rs1` but is written as `count=N`). What each register MEANS
+/// at run time is §3.6 rule E, not this table.
 pub const Accelerator = struct {
     opcode: u8,
     name: []const u8,
-    /// How many source registers the mnemonic writes: 1 = rs1, 2 = rs1+rs2,
-    /// 3 = rs1+rs2+rs3.
+    /// How many source registers the mnemonic WRITES: 1 = rs1, 2 = rs1+rs2,
+    /// 3 = rs1+rs2+rs3. This is the textual count, not the number of registers the
+    /// operation touches.
     sources: u2,
-    /// Whether the mnemonic accepts `count=N`.
+    /// Whether the mnemonic accepts `count=N`. False means the field must stay zero
+    /// in the word, because the operation has no counted length.
     takes_count: bool,
 };
 
@@ -115,15 +123,22 @@ pub const accelerators = [_]Accelerator{
     .{ .opcode = 0x61, .name = "matrix.invert", .sources = 2, .takes_count = false },
     .{ .opcode = 0x62, .name = "matrix.mul", .sources = 2, .takes_count = false },
     .{ .opcode = 0x63, .name = "matrix.transform", .sources = 1, .takes_count = true },
-    .{ .opcode = 0x64, .name = "matrix.identity", .sources = 0, .takes_count = true },
+    // §3.6 rule E: the order is written as `count=N` and lands in `rs1`, so the
+    // textual form is one named operand and no positional register. With
+    // `.sources = 0` there was no way to fill `rs1` at all, which made the row
+    // unreachable from source; with `.takes_count = true` alone the only spelling
+    // available was the one the VM rejects (a non-zero count field).
+    .{ .opcode = 0x64, .name = "matrix.identity", .sources = 1, .takes_count = false },
     .{ .opcode = 0x70, .name = "fft.forward", .sources = 1, .takes_count = true },
     .{ .opcode = 0x71, .name = "fft.inverse", .sources = 1, .takes_count = true },
     .{ .opcode = 0x72, .name = "fft.ntt", .sources = 2, .takes_count = true },
     .{ .opcode = 0x73, .name = "fft.ntt.inverse", .sources = 2, .takes_count = true },
     .{ .opcode = 0x80, .name = "codec.compress", .sources = 1, .takes_count = true },
     .{ .opcode = 0x81, .name = "codec.decompress", .sources = 1, .takes_count = true },
-    .{ .opcode = 0x82, .name = "codec.fnv1a", .sources = 1, .takes_count = false },
-    .{ .opcode = 0x83, .name = "codec.checksum16", .sources = 1, .takes_count = false },
+    // §3.6 amendment 1.18 rule E: the count's unit is BYTES, and count=0 is a
+    // diagnostic, so the count is the only way these can ever execute from source.
+    .{ .opcode = 0x82, .name = "codec.fnv1a", .sources = 1, .takes_count = true },
+    .{ .opcode = 0x83, .name = "codec.checksum16", .sources = 1, .takes_count = true },
 };
 
 /// Looks up a §3.6 operation by its opcode byte, or null when reserved.
