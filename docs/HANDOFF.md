@@ -1,99 +1,177 @@
-# Session handoff — 2026-11-09
+# Session handoff — 2026-11-09 (second session)
 
-Written because the assistant session began emitting malformed output (repeated
-empty parameter blocks) when attempting multi-step work. Everything below is
-verified state on disk, not recollection.
+Supersedes the earlier handoff of the same date. Everything below was verified by
+running something; claims that were not observed are marked as such.
 
 ---
 
 ## 1. Repository state
 
 ```
-HEAD         4d5dd36  feat(isa): branch, load and store — the ISA could not express a loop (v1.17)
-remote       origin/main, in sync as of 4d5dd36
-working tree DIRTY — two files modified, NOT committed:
-
-  M src/assembler.zig      labels: two-pass resolution (implemented, working)
-  M src/diagnostics.zig    three new label diagnostics
-
-  `zig build` -> exit 0  (the dirty tree COMPILES)
+HEAD         66aee85  docs(status): F32 closed, F35 recorded, and one of our own drafts retracted
+remote       origin/main, IN SYNC as of 66aee85 (pushed)
+working tree CLEAN
 ```
 
-### The uncommitted work is real and almost done
+Three commits landed this session, in this order:
 
-**Labels are implemented and work.** Verified by hand before the session broke:
+| Commit | What |
+|---|---|
+| `07c0017` | `feat(asm)`: labels — branch/jump targets can be named (v1.18) |
+| `025af04` | `fix(crossarch)`: CLS64's "scalar" row is a real loop now (closes **F32**) |
+| `66aee85` | `docs(status)`: F32 closed, F35 recorded, one draft of ours retracted |
+
+**The previous handoff's blocking item is done.** The dirty tree it described is
+committed, the 3 failing label tests pass, and the labels work is byte-verified.
+
+### Gates, all run on a cold cache at `66aee85`
 
 ```sh
-# This assembles, and produces bytes IDENTICAL to the hand-computed numeric version:
-mov R1, 4096
-mov R2, 0
-mov R3, 8
-mov R4, 0
-loop:
-compare R4, R3 -> R5
-branch R5, [EQUAL], done
-load R6, [R1+0]
-add R2, R2, R6
-add R1, R1, 8
-add R4, R4, 1
-jump loop
-done:
-halt
+rm -rf .zig-cache && ~/.local/zig/zig build test --summary all
+  -> Build Summary: 49/49 steps succeeded; 570/570 tests passed   exit 0
+
+~/.local/zig/zig build crossarch   -> 8 rows, no !! warnings
+~/.local/zig/zig build audit       -> 9/9 enforcement points, all 9 rejected when set
+~/.local/zig/zig build live-check  -> all 232 recorded facts still reproduce
+fuzzer (inside build test)         -> checked=11839 identical=11839, 0 mismatches
 ```
-
-It assembles to the same 12 words as the numeric-offset equivalent, and
-`run-bin` halts after 63 instructions — matching the numeric version exactly.
-
-**Why labels were needed:** branch/jump targets were numeric byte offsets only
-(`branch R5, [EQUAL], 48`). Writing "quite a few examples, maybe big ones" by
-hand with magic numbers is not viable.
-
-Design: three passes in `Assembler.assembleSource` —
-1. collect label -> instruction index (and reject duplicates),
-2. assemble, recording unresolved references in `self.pending`,
-3. patch every reference, now that all addresses are known.
-
-Labels resolve to `index * 8`; `branch` gets a PC-relative signed 28-bit delta,
-`jump`/`call` an absolute 48-bit address. `splitLabel` is shared by passes 1 and
-2 so the two cannot drift about which lines emit an instruction.
-
-### The one thing blocking a commit
-
-**3 of the 8 new label tests fail — and it is a TEST bug, not a product bug.**
-
-`assembleOk()` (an existing helper at the bottom of `src/assembler.zig`) asserts
-`prog.words.len == 1`. Three of my new tests feed it multi-instruction programs,
-so they fail with `expected 1, found 4` / `found 2`.
-
-**Fix:** either add a multi-instruction helper (`assembleProgram`) returning the
-whole `[]u64`, or write those three tests against `words[0]`/`words[k]` directly.
-The affected tests are:
-
-- `labels: a forward reference resolves to the right address` (4 instructions)
-- `labels: a backward branch encodes a negative PC-relative offset` (2)
-- `labels: a label on the same line as an instruction still works` (2)
-
-The other five pass, including the two that matter most (duplicate label
-rejected; undefined label rejected rather than patched to 0).
-
-**Also note a trap already hit once:** `assembleSource` MOVES its arena into the
-returned `Program` on success. Calling both `prog.deinit()` and
-`assembler.deinit()` is a double free and aborts. The comment added at the
-"line that is only a label" test records this. This is the same trap
-`src/main.zig` documents.
-
-### After fixing, re-run
-
-```sh
-~/.local/zig/zig test src/assembler.zig --test-filter "labels"
-rm -rf .zig-cache && ~/.local/zig/zig build test --summary all   # expect 49/49 steps
-```
-
-Then commit `src/assembler.zig` + `src/diagnostics.zig` and push.
 
 ---
 
-## 2. The goal in flight
+## 2. What was fixed, and two numbers that were wrong
+
+### Labels (v1.18) — the blocking item
+
+Three passes in `Assembler.assembleSource`: collect label → instruction index and
+reject duplicates, assemble while recording unresolved references in `pending`,
+then patch once every address is known. Labels resolve to `index * 8`; `branch`
+gets a PC-relative signed 28-bit delta **from the branch instruction itself**
+(§3.0.1), `jump`/`call` an absolute 48-bit address. `splitLabel` is shared by
+passes 1 and 2 so they cannot drift.
+
+The test bug was exactly as the old handoff described. But **two inherited numbers
+were wrong**, and both are worth knowing because each could have been "fixed" by
+bending the product instead of the test:
+
+1. **`-16` → `-8`.** The failing test asserted `-16`. The encoder computes
+   `target_addr - branch_addr`, so a branch at address 8 targeting address 0 gives
+   `-8`. Setting it back to `-16` fails, so the assertion is load-bearing.
+2. **The by-hand numeric program did not exist and the first reconstruction
+   faulted.** The old handoff claimed the label program assembles to "the same 12
+   words as the numeric-offset equivalent" but never printed that program. The
+   first attempt to write it used branch delta `80` and `jump 24`, which sends the
+   exit past the 96-byte image and the back-edge to the setup word; the run dies
+   with *"the simulator refused an access at address 48"*. Correct values are a
+   branch delta of `48` and an absolute jump of `32`. Against those the images are
+   **byte-identical** (`cmp` clean) and both halt after 63 simulated instructions —
+   so the handoff's claim holds.
+
+   That mistake was made by an agent that had just read the encoding rules. It is
+   the argument for labels existing, and it is recorded in `docs/STATUS.md` F35.
+
+### F32 is closed — and CLS64 now loses that comparison
+
+The CLS64 "scalar" row was the fused `stream.add` (0x40) eight times at
+`chunk = 1`, not a loop. v1.17's `load`/`store`/`branch` removed the reason that
+could not be fixed, so it is now a real 13-word per-element loop:
+
+```
+CLS64 scalar   11 -> 68 retired     88 -> 544 bytes     (now WORST of four)
+RISC-V scalar  55        (unchanged)
+AArch64 scalar 61        (unchanged)
+x86-64 scalar  60        (unchanged)
+CLS64 batch     4        (unchanged, 32 bytes)  <- still CLS64's real result
+```
+
+This is the honest result, not a regression: the old 11 measured a fused sequence
+under a scalar label. `docs/comparison.md` §7 and `docs/fidelity.md` §3.4 were
+written against the old 4/11 pair — **they have not been updated yet** (§5 below).
+
+---
+
+## 3. What remains
+
+Unchanged in priority from the old handoff, minus items 1 and 2:
+
+1. **Wire the accelerators** — the largest remaining core gap, and the last thing
+   before the example suite. `matrix.zig`, `fft.zig` and `codec.zig` are imported
+   by **no other file**; `0x60`–`0x8F` decodes to an `Accelerator` payload that
+   `vm.zig`'s `execute` sends to its `else` arm, which faults with "not wired into
+   this build yet". The decoder side is already complete and normative (§3.6
+   amendment 1.1: `rs2[47:44] | rs3[43:40] | reserved[39:32] | count[31:0]`), and
+   `decoder.acceleratorGroup()` already maps `0x60-0x6F` → matrix, `0x70-0x7F` →
+   fft, else codec. So the work is a VM-side dispatch, not a contract change.
+2. **The example suite, analyzers, instruction counter** — the bulk of the goal,
+   genuinely unblocked only after 1.
+3. **`cap.*`** stays decode-only. §3.5 v1.12 explains why: the register pair has
+   no `length` bit position, so a capability cannot be reconstructed. Needs a §6
+   redesign, not a bug fix. Do not "fix" it by inventing a field layout.
+
+---
+
+## 4. Environment facts that cost time
+
+- Zig **0.17.1** at `~/.local/zig/zig`. No system `zig`.
+- Verilator **5.49** at `~/.local/verilator/bin/verilator`.
+- LLVM 20 at `/usr/lib/llvm-20/bin/` — use `llvm-mc -triple=<isa> -show-encoding`
+  as an assembler oracle. **There is no LLVM backend for CLS64**, so CLS64's own
+  encodings can only be checked against this repo's decoder. That is
+  self-consistency, not independent verification; say so when quoting them.
+- **Test counts are a measurement, not a calculation.** `zig build test` on a warm
+  cache reports a stale count. Always `rm -rf .zig-cache` before quoting a number.
+- `zig build test --summary all` may print a `failed command:` line from the
+  *build runner* while still reporting `49/49 steps succeeded`. Trust the summary
+  line and the exit code, not that line.
+- Verilator PCH bug: a `--binary` build floods ~8 GB because GCC gets
+  `Vstream_tb__pch.h.fast` as a bare positional argument. Fix with
+  `-MAKEFLAGS "VK_PCH_I_FAST= VK_PCH_I_SLOW="`. Never redirect a Verilator log.
+- Two encoders exist (`assembler.zig` `Instruction.word()` and `decoder.zig`
+  `encode()`); the fuzzer checks they agree. Keep it that way.
+
+### Two traps, both confirmed this session
+
+- **`assembleSource` moves its arena into the returned `Program`.** `Program.arena`
+  is a *value copy* sharing one node list, so `prog.deinit()` **and**
+  `assembler.deinit()` frees the same nodes twice — a double free on the **success**
+  path that aborts. On the failure path nothing was handed over, so the assembler
+  must free.
+- **Returning `prog.words` as a slice is unsafe on its own.** It is the live
+  `ArrayList` buffer, and Zig 0.17's `ArenaAllocator` can *move* that allocation
+  when it grows the same node; a stale slice then reads `0xAAAA…` poison. "The
+  words are arena-owned" does not make a slice safe. Test helpers return `Program`.
+
+---
+
+## 5. Known-stale documentation (do this before quoting the numbers)
+
+- `docs/comparison.md` §7 and `docs/fidelity.md` §3.4 still describe the CLS64
+  scalar row as 11 retired / the 4-vs-11 pair. F32's closure changes that to 68.
+  STATUS.md has the new numbers; those two files do not.
+- `README.md` may quote the old crossarch table. It was not re-read this session.
+
+---
+
+## 6. Honesty constraints this repository enforces
+
+Load-bearing. Do not relax them.
+
+- Every benchmark line contains the word **"simulated"**.
+- **No clock frequency, timing figure, area figure or silicon performance claim
+  appears anywhere.** `docs/fidelity.md` calls such a claim a bug.
+  `src/isaharness.zig` has no field for a timing quantity and a test — "the harness
+  reports no timing quantity of any kind" — fails if one is added.
+- Models are labelled as models; RTL is synthesised but never timing-closed and
+  never on silicon.
+- A finding that turns out to be wrong is **retracted in place**, not deleted.
+  This session retracted its own draft attribution in F35 for exactly this reason.
+- Mutation tests run in **throwaway copies**, never on the shared tree.
+- **A comparison must not favour the subject.** When the honest fix makes CLS64
+  look worse, report the worse number. That happened here (11 → 68) and is the
+  correct outcome.
+
+---
+
+## 7. Goal in flight
 
 ```
 Finish the CLS64 core ISA (no extensions/accelerators), then build a
@@ -104,125 +182,12 @@ efficiency per assembly program. Every example must be verified equivalent
 across all four ISAs and must not favour CLS64.
 ```
 
-Goal id `goal-bcd934e2-c9da-4d29-a68d-3d314631667c`, left **active**. Round
-counter reached 6/40 before the session broke.
+The old handoff recorded goal id `goal-bcd934e2-c9da-4d29-a68d-3d314631667c`.
+**No goal is active in this session** — `get_goal` returned null, so the goal was
+not carried across. If the objective above is to continue, it must be re-created.
 
----
-
-## 3. What is already done toward that goal
-
-### The ISA can now express a loop (v1.17, committed)
-
-Before v1.17 every control transfer was **unconditional** (`jump`, `call`,
-`ret`), so CLS64 could not express a loop *at all*, and the only memory-touching
-opcodes were the fused `stream.*` engine and decode-only `cap.*`, so a scalar
-load did not exist either. Added:
-
-| Opcode | Mnemonic | Form |
-|---|---|---|
-| `0x05` | `branch` | `branch rs1, [MATCH], offset` — tests the status enum `compare` produces; offset is relative to the branch itself |
-| `0x1A` | `load` | `load rd, [rs1+off]` |
-| `0x1B` | `store` | `store rs2, [rs1+off]` |
-
-Four defects were found while implementing them; three by the round-trip fuzzer
-within one run. All are recorded in `docs/STATUS.md` as **F34** and in
-`docs/isa-encoding.md` v1.17. Details worth knowing:
-
-- The assembler's `.control` encoder arm handled only `jump`/`call`, so `branch`
-  assembled to operand 0 — **every loop ran forever**.
-- `branch`'s width nibble was first specified as "checked but not used". The
-  fuzzer disproved it in one run: a validated-but-dropped field loses bits
-  silently. It is now reserved-and-rejected.
-- The decoder accepted a branch offset that is not a multiple of 8, which the
-  assembler refused (the F24/F27 two-layer shape).
-- `load`/`store` accepted a surplus third operand and discarded it silently.
-
-### Cross-architecture execution already works (committed)
-
-`zig build crossarch` executes real machine code for CLS64, RISC-V RV64I,
-AArch64 and x86-64 in **one measurement loop**, reporting retired instructions
-and encoded bytes. Current output:
-
-```
-  Celeris-64 CLS64 batch            4          32        8.00
-  RISC-V RV64I     batch           54         216        4.00
-  AArch64 A64      batch           60         240        4.00
-  x86-64           batch           52         167        3.21
-  Celeris-64 CLS64 scalar          11          88        8.00
-  RISC-V RV64I     scalar          55         220        4.00
-  AArch64 A64      scalar          61         244        4.00
-  x86-64           scalar          60         207        3.45
-```
-
-**No cycles, no clock, no speedup — by design.** `src/isaharness.zig` has no
-field for a timing quantity and a test fails if one is added. The user asked for
-"the same clock"; that was declined because assigning a cycle cost means
-inventing a microarchitecture, and CLS64's number would come from the same
-invention. `docs/comparison.md` §8 records this.
-
-Files: `src/isaharness.zig`, `src/isa_riscv.zig`, `src/isa_aarch64.zig`,
-`src/isa_x86_64.zig`, `src/crossarch.zig`, `tools/crossarch-report.zig`.
-
-The three new decoders are verified against **`llvm-mc` as an oracle** —
-encodings pasted verbatim from LLVM's assembler. That caught three real bugs
-that every self-consistency test passed (sign-extension never shifted back;
-`0xC7` misgrouped with the ALU opcodes; SIB reading a `disp32` that was not
-there). See **F33** in `docs/STATUS.md`.
-
----
-
-## 4. What remains
-
-Ordered by what unblocks the most:
-
-1. **Finish and commit the labels work** (section 1). Small, and without labels
-   the example suite is unreadable regardless of anything else.
-2. **Rewrite CLS64's rows in `crossarch.zig` to use the new `load`/`store`.**
-   Its "scalar" row is currently `stream.add` at `chunk = 1`, NOT an unfused
-   loop — the F32 finding. The other three ISAs' scalar rows ARE real loops, so
-   that row is not comparable. Now that `load`/`store` exist, this can finally
-   be fixed honestly.
-3. **Wire the accelerators.** `matrix.zig`, `fft.zig`, `codec.zig` are imported
-   by **no other file** — `0x60`–`0x8F` decodes to an opaque payload and
-   executes nothing. This is the largest remaining core gap.
-4. **The example suite, analyzers, and instruction counter** — the bulk of the
-   goal, and genuinely unblocked only after 1–3.
-5. **`cap.*`** remains decode-only. §3.5 v1.12 explains why: the register pair
-   has no `length` bit position, so a capability cannot be reconstructed. This
-   needs a §6 redesign, not a bug fix.
-
----
-
-## 5. Environment facts that cost time to rediscover
-
-- Zig **0.17.1** at `~/.local/zig/zig`. There is no system `zig`.
-- Verilator **5.49** at `~/.local/verilator/bin/verilator`.
-- LLVM 20 at `/usr/lib/llvm-20/bin/` — `llvm-mc`, `llc`, `llvm-objdump`. **Use
-  `llvm-mc -triple=<isa> -show-encoding` as the assembler oracle.**
-- **Verilator PCH bug:** a `--binary` build floods ~8 GB of diagnostics because
-  GCC is handed `Vstream_tb__pch.h.fast` as a bare positional argument. Fix with
-  `-MAKEFLAGS "VK_PCH_I_FAST= VK_PCH_I_SLOW="`. `--lint-only` is unaffected.
-  Never redirect a Verilator build log to a file.
-- **Test counts are a measurement, not a calculation.** `zig build test` on a
-  warm cache reports a *stale* count (it showed 395 where the truth was 556).
-  Always `rm -rf .zig-cache` before quoting a number.
-- Two encoders exist (`assembler.zig` `Instruction.word()` and `decoder.zig`
-  `encode()`); the fuzzer checks they agree. Keep it that way.
-- `assembleSource` moves its arena into `Program` — see the double-free trap in
-  section 1.
-
----
-
-## 6. Honesty constraints this repository enforces
-
-These are load-bearing and predate this session. Do not relax them:
-
-- Every benchmark line contains the word **"simulated"**.
-- **No clock frequency, timing figure, area figure or silicon performance claim
-  appears anywhere.** `docs/fidelity.md` calls such a claim a bug.
-- Models are labelled as models; RTL is synthesised but never timing-closed and
-  never on silicon.
-- A finding that turns out to be wrong is **retracted in place**, not deleted.
-  F30 was retracted and F29 re-attributed this way (see `docs/isa-encoding.md`
-  v1.16).
-- Mutation tests run in **throwaway copies**, never on the shared tree.
+Note the tension worth resolving explicitly: the goal says "no
+extensions/accelerators", while the old handoff's item 3 lists wiring the
+accelerators as the next core gap. These are compatible if the accelerators are
+treated as part of the core encoding contract (§3.6) rather than as optional
+extensions — but that reading should be confirmed, not assumed.

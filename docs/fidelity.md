@@ -163,11 +163,24 @@ loop. Both are real Celeris-64 programs executed by `src/vm.zig`.
 > (opcode `0x40`) with `chunk = 8` and with `chunk = 1`, and the 4-vs-11 gap is
 > `3 + 1` against `3 + chunk`. The element-by-element path is not a software loop
 > and does not avoid the fused engine; both programs contain the engine, so the
-> figure says nothing about the engine's value. It cannot be corrected without an
-> ISA change: CLS64 has no general-purpose load or store, so an unfused
-> single-element fetch-modify-write is not expressible. Full statement in
+> figure says nothing about the engine's value. Full statement in
 > `docs/comparison.md` §7. The instruction counts themselves remain accurate and
 > the wording below is unchanged; what changed is what they may be taken to mean.
+>
+> **Update (v1.18) — F32 is closed, and the sentence that said this "cannot be
+> corrected" was wrong.** That sentence read: *"It cannot be corrected without an
+> ISA change: CLS64 has no general-purpose load or store, so an unfused
+> single-element fetch-modify-write is not expressible."* The first half was
+> correct and the second half was conditional on a change that has since been
+> made — **v1.17 added `load` (`0x1A`), `store` (`0x1B`) and a conditional
+> `branch` (`0x05`)**. The cross-architecture scalar row in `docs/comparison.md`
+> §8 is now a genuine 13-word per-element loop and retires **68** instructions,
+> not 11, ranking CLS64 **last of the four ISAs** on that row.
+>
+> The block below is the `zig build bench` output and remains accurate **for that
+> benchmark**, whose `scalarWords` still issues `chunk = 1` `stream.add`s. It is no
+> longer a description of the cross-architecture scalar row. Do not quote the
+> `11` here as CLS64's scalar-loop result; it is a fused sequence at `chunk = 1`.
 
 Observed output (`~/.local/zig/zig build bench`):
 

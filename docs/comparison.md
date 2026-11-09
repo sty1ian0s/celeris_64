@@ -237,14 +237,19 @@ streamOperand(2, 1, .full))` — opcode `0x40` is `stream.add`, *the fused engin
 software loop in either program and no unfused load/add/store triple in either; the
 words are identical except for the chunk field.
 
+> **Fixed in v1.18** for the cross-architecture report in §8 (the CLS64 scalar row is
+> now a real `load`/`store`/`branch` loop). The paragraphs below describe the state
+> that was found and are kept as the finding. **`benchmarks/bench.zig` was corrected
+> in place when F32 was recorded** and is not affected by the v1.18 change.
+
 So the 4-vs-11 difference measures **how many times the same instruction is issued**,
-and it is pure arithmetic. Both programs are `mov`, `mov`, then N copies of
-`stream.add`, then `halt`:
+and it is pure arithmetic. At the time, both programs were `mov`, `mov`, then N copies
+of `stream.add`, then `halt`:
 
 | Path | N | Retired | Formula |
 |---|---|---|---|
 | batch | 1 (`chunk = 8`) | 4 | `3 + 1` |
-| scalar | 8 (`chunk = 1` each) | 11 | `3 + chunk` |
+| scalar *(as found, pre-v1.18)* | 8 (`chunk = 1` each) | 11 | `3 + chunk` |
 
 At `chunk = 1` the two paths retire the **same** 4 instructions, which is the clearest
 statement of the problem: the "scalar" path is the batch path with a smaller chunk. The
@@ -262,9 +267,14 @@ distinction real, because there is no second shape in the program.
 
 ### 7.4 Why a true scalar shape cannot currently be written
 
+### 7.4 Why a true scalar shape could not be written *at the time* (now fixed)
+
+> **This subsection is the historical record of the finding, kept as written. It
+> stopped being true in v1.17–v1.18; see the correction at the end of §7.**
+
 The honest fix would be to write the element-at-a-time path using load and store
-instructions, as the C and Rust scalar paths do. **CLS64 has no general-purpose load or
-store instruction.** Every memory access in the §3 opcode map is one of:
+instructions, as the C and Rust scalar paths do. **CLS64 had no general-purpose load
+or store instruction.** Every memory access in the §3 opcode map was one of:
 
 | Opcode | Mnemonic | Memory role |
 |---|---|---|
@@ -285,15 +295,49 @@ provides no way to write one.
 
 ### 7.5 What may and may not be said
 
+> **Superseded in part by v1.18; kept as the record of the state before it.** The
+> first bullet described the *old* scalar program and is now a statement about
+> `chunk` granularity only, not about the published scalar row — that row is a real
+> loop as of v1.18 and retires 68. The second and third bullets still hold in full.
+
 - **May be said:** the simulator retires 4 instructions for a `chunk = 8` `stream.add`
-  and 11 for eight `chunk = 1` issues of the same instruction.
+  and 11 for eight `chunk = 1` issues of the same instruction. *(This remains true of
+  those two instruction sequences; it is no longer what the scalar row contains.)*
 - **May not be said:** that this is a speedup, that it is the stream engine's advantage,
   or that it evidences §1.2's claim about loop overhead. The engine is on both sides.
 - **Not measured:** encoding density against RISC-V, x86-64 or ARM64; no toolchain.
 
-**Status: open.** Closing this needs either a load/store instruction in the ISA (a
-contract change) or a restatement of §2 that names the two rows for what they are —
-the same instruction at two granularities.
+### 7.6 CLOSED (v1.18) — the contract change was made, and CLS64 loses
+
+Of the two routes this section offered, the first was taken: **v1.17 added `load`
+(`0x1A`), `store` (`0x1B`) and a conditional `branch` (`0x05`)** to the contract. The
+"not expressible in this ISA at all" paragraph above is therefore no longer true, and
+the element-at-a-time row is now written the same way the other three ISAs' rows are.
+
+The measured consequence, which replaces the old 4-vs-11 pair as the scalar result:
+
+| Row | Retired before | Retired after | Bytes before | Bytes after |
+|---|---|---|---|---|
+| CLS64 batch | 4 | 4 (unchanged) | 32 | 32 (unchanged) |
+| **CLS64 scalar** | **11** | **68** | **88** | **544** |
+
+**CLS64 now ranks last of the four on the scalar row.** That is what an honest fix
+looks like here: the old `11` was the fused engine's number wearing a scalar label.
+What may be said after the correction:
+
+- **May be said:** written as a per-element loop, CLS64's scalar row retires more
+  instructions than any of the other three — 68 against 55, 61 and 60 — because all
+  CLS64 instructions are a fixed 8 bytes and the loop needs five instructions of
+  bookkeeping per element.
+- **May be said:** CLS64's fused engine still retires 4 instructions for the same
+  workload, and that 8:1 gap is now a genuine algorithmic difference between two
+  different programs rather than an artefact of call granularity.
+- **May not be said:** anything about speed, cycles or silicon. The axis is retired
+  instructions in a simulator, and the encoding-density axis remains unmeasured for
+  want of an ARM/RISC-V toolchain.
+
+**Status: closed.** The remaining unwired pieces (`cap.*`, the `0x60`–`0x8F`
+accelerators) are recorded in `docs/STATUS.md` and do not bear on this comparison.
 
 ---
 
@@ -319,10 +363,26 @@ zig build crossarch
 | RISC-V RV64I | batch | 54 | 216 | 4.00 |
 | AArch64 A64 | batch | 60 | 240 | 4.00 |
 | x86-64 | batch | 52 | 167 | **3.21** |
-| Celeris-64 CLS64 | scalar | 11 | 88 | 8.00 |
-| RISC-V RV64I | scalar | 55 | 220 | 4.00 |
+| Celeris-64 CLS64 | scalar | **68** | 544 | 8.00 |
+| RISC-V RV64I | scalar | 55 | 220 | **4.00** |
 | AArch64 A64 | scalar | 61 | 244 | 4.00 |
 | x86-64 | scalar | 60 | 207 | **3.45** |
+
+**Correction (F32 closed, v1.18).** The CLS64 scalar row read `11` / `88` until
+this revision. That row was **not a scalar loop**: it emitted the same fused
+`stream.add` (opcode `0x40`) as the batch row, eight times with `chunk = 1`. The
+other three ISAs' scalar rows are genuine per-element loops, so the table was
+comparing a loop-less fused sequence against real loops.
+
+It could not be fixed when the problem was found, and §7 says why: through v1.16
+CLS64 had no `load`, no `store` and no conditional branch, so an unfused
+element-at-a-time loop was not expressible in the ISA at all. v1.17 added those
+three instructions, and the row is now a real 13-word loop.
+
+**CLS64 now ranks LAST on the scalar row** — 68 retired against RISC-V's 55,
+AArch64's 61 and x86-64's 60. That is the honest result and the reason to publish
+it: the previous `11` was the fused engine's number wearing a scalar label. The
+batch row is unchanged and remains CLS64's one genuine result.
 
 Same workload as §2: add 5 to each of 8 contiguous `u64` elements. Every program's
 resulting memory is compared against the others, so a program that ran but computed
