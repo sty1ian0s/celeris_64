@@ -8,9 +8,9 @@ running something; claims that were not observed are marked as such.
 ## 1. Repository state
 
 ```
-HEAD         05dc26c  fix(x86-64): opcode-embedded registers added REX.B as 1 instead of 8 (F44)
+HEAD         d491f3f  feat(examples): xor_reduce — the bit-manipulation kernel (F45)
 remote       origin/main, IN SYNC after the push below (was b081f6f)
-working tree CLEAN (at 05dc26c)
+working tree CLEAN (at d491f3f)
 ```
 
 Four commits landed this session, in this order:
@@ -27,6 +27,8 @@ Four commits landed this session, in this order:
 | `2bcd250` | `feat(examples)`: **`stream_copy_sum` — the suite's first CLS64 WIN (F42)**, + name-based test lookup |
 | `3543b8b` | `docs(status)`: F42 — the first win, why it is attributable |
 | `05dc26c` | `fix(x86-64)`: **F44 — opcode-embedded registers added REX.B as 1 instead of 8**; + **F43** recorded; + `band_count` |
+| `1276b61` | `docs(handoff)`: F44 fixed, F43 recorded as the outstanding decision |
+| `d491f3f` | `feat(examples)`: **AArch64 gains its logical group (closes F45)**; + **`xor_reduce`** |
 
 ### Gates, all run on a cold cache at `433d950`
 
@@ -35,7 +37,7 @@ rm -rf .zig-cache && ~/.local/zig/zig build test --summary all
   -> Build Summary: 53/53 steps succeeded; 1016/1016 tests passed   exit 0
 
 bash tests/mulout_e2e.sh           -> 6/6 checks passed        exit 0
-~/.local/zig/zig build examples    -> 10 kernels x 4 ISAs, all byte-equivalent
+~/.local/zig/zig build examples    -> 11 kernels x 4 ISAs, all byte-equivalent
 ~/.local/zig/zig build audit       -> 9/9 enforcement points, all 9 rejected when set
 ~/.local/zig/zig build live-check  -> all 232 recorded facts still reproduce
 ~/.local/zig/zig build crossarch   -> 8 rows, no !! warnings
@@ -235,14 +237,21 @@ test really exercises the shipped programs rather than only fixtures.
 
 ## 6. What remains
 
-1. **More example kernels** — ten are delivered (`signed_max`, `stream_copy_sum`,
-   `band_count`); see §4, F42 and the F41 entry. The suite runs 10 kernels x 4 ISAs. Further breadth is welcome, and §4's rule applies to every one
-   of them: **verify each instruction against `src/isa_*.zig` before measuring**, hand-write
-   the programs rather than generating them, and declare `.expected_loss` where CLS64 loses
-   (which is everywhere so far). Candidate shapes not yet covered: a branch-heavy control-flow
-   kernel, a memory copy, a bit-manipulation kernel with a non-identity result, a
-   struct-of-arrays traversal. **Do not retry** the data-driven table walk (a dead end — see
-   F41: it needs a "dead destination register" primitive that no four-ISA set provides).
+1. **More example kernels.** Eleven are delivered: `fused_stream_add`, `stream_copy_sum`,
+   `count_rises`, `band_count`, `loop_sum`, `byte_sum`, `word_sum`, `stride_sum`,
+   `matmul_8x8`, `signed_max`, `xor_reduce`. The suite runs 11 kernels x 4 ISAs.
+   **Of the shapes the objective named, only struct-of-arrays traversal is left** — branch
+   control flow, memory copy and bit-manipulation are all covered.
+
+   The rule for each new kernel is in §4 and F41, and it has earned its keep three times:
+   **verify every instruction against `src/isa_*.zig` before measuring**, hand-write the
+   programs rather than generating them, and declare honest expectations. **F45 is the
+   precedent for the other direction:** when the instruction you need does not exist in a
+   subset, implementing it in the decoder is the honest fix — as long as you verify it
+   against LLVM's own encodings and prove it load-bearing with a mutation.
+
+   **Do not retry** the data-driven table walk. It is a dead end: it needs a "dead
+   destination register" primitive that no four-ISA set provides (see F41).
 2. **More analyzers** — breadth, not mechanism. The module header lists what is unsound and
    why; read it before proposing anything.
 3. **F43 — OPEN, AND THE MOST IMPORTANT THING IN THIS SECTION.**
