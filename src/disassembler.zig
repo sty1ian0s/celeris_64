@@ -114,10 +114,11 @@ fn accelerator(i: anytype, w: *std.Io.Writer) std.Io.Writer.Error!void {
     const spec = assembler_accel.acceleratorByOpcode(i.opcode);
     if (spec == null) {
         // Reserved: keep every bit and reinterpret nothing. `.raw` takes the
-        // opcode byte and the full 48-bit operand, so the word is reconstructed
-        // exactly rather than being decoded as a neighbouring operation.
-        try w.print(".raw {d}, {d}", .{ i.opcode, i.operand });
-        return;
+        // opcode byte, the full 48-bit operand, and (F20) the `rd`/`rs1` indices
+        // that live OUTSIDE the operand field in bits [55:48]. Emitting only the
+        // operand lost those two fields, so a reserved word re-assembled to a
+        // different word — silently, at exit 0.
+        return rawFallback(i, w);
     }
     const a = spec.?;
 
@@ -129,8 +130,7 @@ fn accelerator(i: anytype, w: *std.Io.Writer) std.Io.Writer.Error!void {
         (a.sources < 2 and i.rs2 != 0) or
         (!a.takes_count and i.count != 0);
     if (unused_nonzero) {
-        try w.print(".raw {d}, {d}", .{ i.opcode, i.operand });
-        return;
+        return rawFallback(i, w);
     }
 
     try w.print("{s} {s}", .{ a.name, regName(i.rd) });
@@ -144,12 +144,15 @@ fn accelerator(i: anytype, w: *std.Io.Writer) std.Io.Writer.Error!void {
 }
 
 fn alu(mnemonic: []const u8, i: anytype, w: *std.Io.Writer) std.Io.Writer.Error!void {
-    // §3.1: a zero immediate means the source is the rs2 register; a non-zero
-    // immediate means immediate form and rs2 is ignored. Printing both would
-    // produce text that re-assembles to a different word.
     // §3.1: imm28 == 0 means the source is the rs2 register; a non-zero imm28
-    // means immediate form. Printing both would re-assemble to a different word.
+    // means immediate form, and there `rs2` is IGNORED but still occupies
+    // bits [47:44]. F21: printing the immediate form dropped a non-zero `rs2`
+    // on the floor, so `0x1012300000000005` (rs2=3) and `0x1012000000000005`
+    // (rs2=0) both rendered as "add R1, R2, 5" and the first was rewritten into
+    // the second. A word the mnemonic cannot express falls back to `.raw`, which
+    // preserves every bit — the same rule §3.6 already used.
     if (i.imm) |imm| {
+        if (i.rs2 != 0) return rawFallback(i, w);
         try w.print("{s} {s}{s}, {s}, {d}", .{
             mnemonic, regName(i.rd), widthSuffix(i.width), regName(i.rs1), imm,
         });
@@ -160,8 +163,22 @@ fn alu(mnemonic: []const u8, i: anytype, w: *std.Io.Writer) std.Io.Writer.Error!
     }
 }
 
+/// F20/F21/F22/F23/F25/F26/F29. A word whose register/operand bits the mnemonic
+/// cannot name is emitted as `.raw`, carrying the opcode byte, the 48-bit operand
+/// and the two register indices. Rendering the mnemonic instead would drop those
+/// bits and silently rewrite the word — the defect class this whole family shares.
+fn rawFallback(i: anytype, w: *std.Io.Writer) std.Io.Writer.Error!void {
+    // Most payloads name the opcode byte `op`; `Accelerator` calls it `opcode`.
+    const T = @TypeOf(i);
+    const op: u8 = if (@hasField(T, "opcode")) i.opcode else i.op;
+    try w.print(".raw {d}, {d}, {d}, {d}", .{ op, i.operand, i.rd, i.rs1 });
+}
+
 fn mov(i: anytype, w: *std.Io.Writer) std.Io.Writer.Error!void {
-    // §3.1: `mov rd, src2`; rs1 is ignored, so it is not printed.
+    // §3.1: `mov rd, src2`; rs1 is ignored, so it is not printed. F22: ignored
+    // is not the same as absent — a non-zero rs1 still occupies bits [51:48] and
+    // is destroyed by re-assembly, so such a word must go to `.raw`.
+    if (i.rs1 != 0) return rawFallback(i, w);
     if (i.imm) |imm| {
         try w.print("mov {s}{s}, {d}", .{ regName(i.rd), widthSuffix(i.width), imm });
     } else {
@@ -172,10 +189,20 @@ fn mov(i: anytype, w: *std.Io.Writer) std.Io.Writer.Error!void {
 fn compare(i: anytype, w: *std.Io.Writer) std.Io.Writer.Error!void {
     // The spec's literal spelling, celeris_64-architecture-specification.md §3.2:
     //     compare R0, R1 -> R2
+    // F29: §3.2.1 shares §3.1's ALU operand layout ([47:44] rs2, [43:40] width,
+    // [39:28] reserved, [27:0] imm28) but says nothing about a width suffix, and
+    // this renderer emitted none — so a word with a non-zero width nibble was
+    // silently rewritten with width 0 (`0x201D830000000000` -> `...80...`).
+    // The suffix belongs to the operand register, exactly as it does for the ALU
+    // opcodes, so it is emitted here too.
+    const suffix = widthSuffix(i.width);
     if (i.imm) |imm| {
-        try w.print("compare {s}, {d} -> {s}", .{ regName(i.rs1), imm, regName(i.rd) });
+        if (i.rs2 != 0) return rawFallback(i, w);
+        try w.print("compare {s}{s}, {d} -> {s}", .{ regName(i.rs1), suffix, imm, regName(i.rd) });
     } else {
-        try w.print("compare {s}, {s} -> {s}", .{ regName(i.rs1), regName(i.rs2), regName(i.rd) });
+        try w.print("compare {s}{s}, {s}{s} -> {s}", .{
+            regName(i.rs1), suffix, regName(i.rs2), suffix, regName(i.rd),
+        });
     }
 }
 
@@ -190,6 +217,10 @@ fn select(i: anytype, w: *std.Io.Writer) std.Io.Writer.Error!void {
 fn field(mnemonic: []const u8, i: anytype, w: *std.Io.Writer, with_src: bool) std.Io.Writer.Error!void {
     // The spec's literal spelling, §3.3:
     //     field.extract R0, R1, offset=12, width=3
+    // F25: §3.3 defines src2[31:28] for `field.insert` only. `field.extract`
+    // leaves it unused and the renderer dropped it, so a word carrying a
+    // non-zero src2 was silently rewritten. Unused is not absent.
+    if (!with_src and i.src2 != 0) return rawFallback(i, w);
     try w.print("{s} {s}, {s}, offset={d}, width={d}", .{
         mnemonic, regName(i.rd), regName(i.rs1), i.offset, i.width,
     });
@@ -197,6 +228,10 @@ fn field(mnemonic: []const u8, i: anytype, w: *std.Io.Writer, with_src: bool) st
 }
 
 fn stream(mnemonic: []const u8, i: anytype, w: *std.Io.Writer) std.Io.Writer.Error!void {
+    // F26: `stream.setp` (0x43) uses [39:0] as its stride and defines no rs2,
+    // so a word carrying one there cannot be expressed. The other three all have
+    // an offset register per §3.4 and the renderer already prints it.
+    if (i.op == 0x43 and i.rs2 != 0) return rawFallback(i, w);
     // The spec's literal spelling, §3.4:
     //     stream.add R0, [R1]+CHUNK_SIZE, R2
     // `CHUNK_SIZE` is the spec's own name for one hardware chunk; we print the
@@ -217,6 +252,9 @@ fn stream(mnemonic: []const u8, i: anytype, w: *std.Io.Writer) std.Io.Writer.Err
 }
 
 fn cap(mnemonic: []const u8, i: anytype, w: *std.Io.Writer) std.Io.Writer.Error!void {
+    // §3.5 reserves the whole operand[47:0]; a word reaching the renderer with a
+    // non-zero operand is not expressible as two registers.
+    if (i.operand != 0) return rawFallback(i, w);
     try w.print("{s} {s}, {s}", .{ mnemonic, regName(i.rd), regName(i.rs1) });
 }
 
