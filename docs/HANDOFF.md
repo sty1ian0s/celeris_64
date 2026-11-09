@@ -8,9 +8,9 @@ running something; claims that were not observed are marked as such.
 ## 1. Repository state
 
 ```
-HEAD         2bcd250  feat(examples): stream_copy_sum — the suite's first CLS64 WIN
+HEAD         05dc26c  fix(x86-64): opcode-embedded registers added REX.B as 1 instead of 8 (F44)
 remote       origin/main, IN SYNC after the push below (was b081f6f)
-working tree CLEAN (at 2bcd250)
+working tree CLEAN (at 05dc26c)
 ```
 
 Four commits landed this session, in this order:
@@ -25,6 +25,8 @@ Four commits landed this session, in this order:
 | `433d950` | `feat(examples)`: **the eighth kernel lands as `signed_max` (closes F41)** |
 | `2067d7c` | `fix(docs)`: the "six example kernels" count was wrong in four places, and nothing checked it |
 | `2bcd250` | `feat(examples)`: **`stream_copy_sum` — the suite's first CLS64 WIN (F42)**, + name-based test lookup |
+| `3543b8b` | `docs(status)`: F42 — the first win, why it is attributable |
+| `05dc26c` | `fix(x86-64)`: **F44 — opcode-embedded registers added REX.B as 1 instead of 8**; + **F43** recorded; + `band_count` |
 
 ### Gates, all run on a cold cache at `433d950`
 
@@ -33,7 +35,7 @@ rm -rf .zig-cache && ~/.local/zig/zig build test --summary all
   -> Build Summary: 53/53 steps succeeded; 1016/1016 tests passed   exit 0
 
 bash tests/mulout_e2e.sh           -> 6/6 checks passed        exit 0
-~/.local/zig/zig build examples    -> 9 kernels x 4 ISAs, all byte-equivalent
+~/.local/zig/zig build examples    -> 10 kernels x 4 ISAs, all byte-equivalent
 ~/.local/zig/zig build audit       -> 9/9 enforcement points, all 9 rejected when set
 ~/.local/zig/zig build live-check  -> all 232 recorded facts still reproduce
 ~/.local/zig/zig build crossarch   -> 8 rows, no !! warnings
@@ -233,8 +235,8 @@ test really exercises the shipped programs rather than only fixtures.
 
 ## 6. What remains
 
-1. **More example kernels** — nine are delivered (`signed_max`, then `stream_copy_sum`);
-   see §4 and F42. The suite runs 9 kernels x 4 ISAs. Further breadth is welcome, and §4's rule applies to every one
+1. **More example kernels** — ten are delivered (`signed_max`, `stream_copy_sum`,
+   `band_count`); see §4, F42 and the F41 entry. The suite runs 10 kernels x 4 ISAs. Further breadth is welcome, and §4's rule applies to every one
    of them: **verify each instruction against `src/isa_*.zig` before measuring**, hand-write
    the programs rather than generating them, and declare `.expected_loss` where CLS64 loses
    (which is everywhere so far). Candidate shapes not yet covered: a branch-heavy control-flow
@@ -243,15 +245,33 @@ test really exercises the shipped programs rather than only fixtures.
    F41: it needs a "dead destination register" primitive that no four-ISA set provides).
 2. **More analyzers** — breadth, not mechanism. The module header lists what is unsound and
    why; read it before proposing anything.
-3. **The accelerators.** 11 of 13 execute. `matrix.mul` (0x62) and `codec.decompress`
+3. **F43 — OPEN, AND THE MOST IMPORTANT THING IN THIS SECTION.**
+   `UNSIGNED_LESS` (3) and `UNSIGNED_GREATER` (4) are **unreachable from any CLS64
+   program**. `src/vm.zig:293` calls `compareSigned` unconditionally, and that function can
+   only ever return `EQUAL`/`LESS`/`GREATER`. So every `branch Rs, [UNSIGNED_LESS], ...` is
+   **dead code that never fires**, silently, with no assembler or decoder complaint.
+
+   It is worse than an unimplemented corner: `rtl/select_unit.sv:115-124` computes **all
+   five** statuses from a `signed_view_i` port and `rtl/tb/stream_tb.sv:612-613` pins their
+   values — **the simulator and the RTL disagree about a normative §3.2.1 table**, and the
+   RTL is the one that matches it. `src/analyzer.zig:62-66` noticed the symptom and worked
+   around it rather than reporting it.
+
+   It cost a debugging round: a kernel counting an *unsigned* band returned 0 instead of 61.
+   **Closing it is a decision, not a patch** — either give the simulator the unsigned view
+   (the encoding carries **no signedness bit**, so a rule is needed for which view a bare
+   `compare` uses), or reword §3.2.1 so `UNSIGNED_*` are reserved and every `[UNSIGNED_*]`
+   branch becomes a diagnosed error rather than silent dead code. **Do not pick one
+   silently.** Full write-up in `docs/STATUS.md` F43.
+4. **The accelerators.** 11 of 13 execute. `matrix.mul` (0x62) and `codec.decompress`
    (0x81) are **refused by design**, each for a stated reason that is a property of the
    operation, not a missing constant (F36 in `docs/STATUS.md`). `0x65 matrix.mulout` was
    added by 1.19 and **executes**. **Do not "complete" the refusal by inventing a
    convention.**
-4. **`cap.*`** stays decode-only. §3.5 v1.12 explains why: the register pair has no
+5. **`cap.*`** stays decode-only. §3.5 v1.12 explains why: the register pair has no
    `length` bit position, so a capability cannot be reconstructed. Needs a §6 redesign, not
    a bug fix.
-5. **CLS64 loses eight of the nine example kernels** — but NOT all of them any more.
+6. **CLS64 loses nine of the ten example kernels** — but NOT all of them any more.
    `stream_copy_sum` is the first WIN: 1801 retired against RISC-V's 3342, AArch64's 3853
    and x86-64's 3085. It wins because the kernel is **purely streaming** — one fused
    `stream.copy` replaces the other three ISAs' entire 256-iteration copy loop — and the
@@ -269,6 +289,21 @@ test really exercises the shipped programs rather than only fixtures.
 
 - Zig **0.17.1** at `~/.local/zig/zig`. No system `zig`.
 - Verilator **5.49** at `~/.local/verilator/bin/verilator`.
+- **A warm-cache `zig build test` reports a PARTIAL count** — it said `811/811` while the
+  cold run said `1019/1019`, because it sums a subset of the per-binary steps. Always
+  `rm -rf .zig-cache` before quoting a number, and never while another build runs.
+- **A green test can be asserting the wrong thing.** F37's decoder and F40's RTL table were
+  both passing while disagreeing with the contract, and F44's `movq` wrote the wrong
+  register while reporting the correct instruction length. Ask what a passing check
+  *asserts*, not whether it is green.
+- **Verify every ISA instruction against `src/isa_*.zig` before measuring.** `llvm-mc`
+  accepts instructions these subsets reject: a bare AArch64 `lsl` is UBFM and is **not
+  implemented** (the shift must live in MOVZ's own `lsl #48` field), and RISC-V's `ecall`
+  halt reads register **17 (a7)** specifically, so `li a5, 93; ecall` assembles, computes
+  the right answer, then faults. Three separate defects were caught this way.
+- **Copy machine words from the produced object — never retype or paste them from a draft.**
+  A stale word list cost a round: `li a0, 8704` is TWO instructions (`li a0, 17; slli a0,
+  a0, 9`), because 8704 does not fit one immediate.
 - **`zig fmt` is NOT usable as a gate on this tree.** It flags `src/decoder.zig` and
   `src/vm.zig`, but **both were already flagged at HEAD** — and this toolchain's formatter
   wants a **semantic rewrite** (`@enumFromInt` → `@fromBackingInt`), not whitespace.
