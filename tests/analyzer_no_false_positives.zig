@@ -25,8 +25,12 @@ const examples = asmb.examples;
 
 const testing = std.testing;
 
-/// Assembles and analyzes one program, printing every finding so a failure names
-/// the sentence rather than just a count.
+/// Assembles and analyzes one program and returns how many findings it produced,
+/// printing each one so a failure names the sentence rather than just a count.
+///
+/// "FALSE POSITIVE" is asserted by the caller, not here: the positive tests below
+/// call this on programs the rule is SUPPOSED to flag, so a finding is not by itself
+/// an error at this point.
 fn findingsFor(name: []const u8, source: []const u8) !usize {
     var a = asmb.Assembler.init(testing.allocator);
     var d: asmb.Diagnostic = .{};
@@ -35,7 +39,7 @@ fn findingsFor(name: []const u8, source: []const u8) !usize {
     // so exactly one of the two owners is released on each path.
     var program = a.assembleSource(name, source, &d) catch {
         a.deinit();
-        std.debug.print("the repository's own program \"{s}\" did not assemble: ", .{name});
+        std.debug.print("the program \"{s}\" did not assemble: ", .{name});
         var dbuf: [1024]u8 = undefined;
         std.debug.print("{s}\n", .{diag.renderToBuffer(d, &dbuf)});
         return error.AssemblyFailed;
@@ -45,14 +49,13 @@ fn findingsFor(name: []const u8, source: []const u8) !usize {
     const findings = a.analyzeSource(name);
     for (findings.slice()) |f| {
         var buf: [1024]u8 = undefined;
-        std.debug.print("FALSE POSITIVE in the analyzer, on the correct program \"{s}\":\n  {s}\n", .{
+        std.debug.print("finding on \"{s}\":\n  {s}\n", .{
             name,
             diag.renderToBuffer(f, &buf),
         });
     }
     return findings.len;
 }
-
 test "the six example kernels produce no findings" {
     // If this fails, the ANALYZER is wrong, not the kernel: each of these is
     // executed by the example suite and checked against a reference answer and
@@ -81,6 +84,184 @@ test "the four cross-check programs produce no findings" {
 
 fn opcodeOf(word: u64) asmb.Opcode {
     return @fromBackingInt(@intCast(@as(u8, @truncate(word >> 56))));
+}
+
+/// tests/mulout_e2e.sh's self-checking matrix program, copied verbatim from the
+/// heredoc (comments and indentation removed). Its `jump 400000` is the DELIBERATE
+/// fault trap: a mismatch must leave the 64 KiB image so it faults loudly. A rule
+/// that reported a transfer leaving the source would fire here, and this program is
+/// correct by construction.
+const mulout_self_check =
+    \\mov R1, 1024
+    \\mov R2, 1088
+    \\mov R3, 1216
+    \\matrix.mulout R3, R1, R2
+    \\mov R4, 1224
+    \\load R5, [R4+0]
+    \\load R6, [R4+8]
+    \\load R7, [R4+16]
+    \\load R8, [R4+24]
+    \\mov R11, 1280
+    \\load R9, [R11+0]
+    \\compare R10, R5, R9
+    \\branch R10, [EQUAL], el00
+    \\jump 400000
+    \\el00:
+    \\load R9, [R11+8]
+    \\compare R10, R6, R9
+    \\branch R10, [EQUAL], el01
+    \\jump 400000
+    \\el01:
+    \\load R9, [R11+16]
+    \\compare R10, R7, R9
+    \\branch R10, [EQUAL], el10
+    \\jump 400000
+    \\el10:
+    \\load R9, [R11+24]
+    \\compare R10, R8, R9
+    \\branch R10, [EQUAL], done
+    \\jump 400000
+    \\done:
+    \\halt
+;
+
+test "the programs the shell drivers in tools/ and tests/ assemble produce no findings" {
+    // Requirement: every CLS64 program in the repository is run against a new rule.
+    // These are the inline programs embedded in `tools/accel_e2e.sh` and
+    // `tests/mulout_e2e.sh` as heredocs, which the arithmetic a rule keys on can
+    // trip over: `jump 400000` deliberately leaves the image as a mismatch trap, and
+    // the `stream.*` cases put the element and offset registers in unusual places.
+    // Each string is copied VERBATIM from its driver, minus indentation.
+    const cases = [_]struct { name: []const u8, source: []const u8 }{
+        // tools/accel_e2e.sh
+        .{ .name = "accel_e2e:fnv.asm", .source = "mov R2, 0x1000\ncodec.fnv1a R1, R2, count=3\nhalt\n" },
+        .{ .name = "accel_e2e:ident.asm", .source = "mov R1, 0x1000\nmov R2, 2\nmatrix.identity R1, R2\nhalt\n" },
+        .{ .name = "accel_e2e:zerocount.asm", .source = "mov R2, 0x1000\ncodec.fnv1a R1, R2\nhalt\n" },
+        .{ .name = "accel_e2e:misaligned.asm", .source = "mov R1, 0x1002\nmov R2, 2\nmatrix.identity R1, R2\nhalt\n" },
+        .{ .name = "accel_e2e:oob.asm", .source = "mov R2, 0x40\ncodec.fnv1a R1, R2, count=1048576\nhalt\n" },
+        .{ .name = "accel_e2e:comp.asm", .source = "mov R2, 0x1000\ncodec.compress R1, R2, count=8\nhalt\n" },
+        .{ .name = "accel_e2e:dec.asm", .source = "codec.decompress R1, R2, count=8\nhalt\n" },
+        .{ .name = "accel_e2e:mul.asm", .source = "matrix.mul R1, R2, R3\nhalt\n" },
+        // tests/mulout_e2e.sh — the self-checking matrix program. Its `jump 400000`
+        // is the deliberate fault trap, and it must NOT be reported: leaving the
+        // image is the behaviour that program depends on (§2.3).
+        .{ .name = "mulout_e2e:mul.asm", .source = mulout_self_check },
+        .{ .name = "mulout_e2e:old.asm", .source = "matrix.mul R1, R2, R3\nhalt\n" },
+        // tools/v22_gen.sh, the thread/capability sweep's skeleton.
+        .{ .name = "v22_gen:threads.asm", .source = "thread.spawn no slots, R0\nthread.spawn T0, R1\nthread.spawn T3, R1\nthread.spawn T7, R1\nthread.spawn T0, T3, T7, R1\nthread.join T2\nthread.yield\n" },
+        // tools/v22_gen.sh, the capability/thread sweep. The two-operand forms are
+        // the legal ones; `cap.load R2, R3, R4` is in that generator's list too, but
+        // it is expected to be REJECTED there ("[REJECT]" in its output), so it is
+        // not a program and cannot be asserted to assemble here.
+        .{ .name = "v22_gen:cap.asm", .source = "cap.load R2, R3\ncap.store R3, R2\ncap.check R2, R3\ncap.check R0, R1\ncap.check R0, R7\n" },
+    };
+    var total: usize = 0;
+    for (cases) |c| total += try findingsFor(c.name, c.source);
+    try testing.expectEqual(@as(usize, 0), total);
+}
+
+// ---------------------------------------------------------------------------
+// The rules added for breadth: each is proved to FIRE on the program shape it
+// targets and to stay SILENT on a nearby correct program. Both halves matter —
+// a rule that never fires is dead weight, and a rule that fires on the correct
+// neighbour is the defect this file exists to catch.
+// ---------------------------------------------------------------------------
+
+test "a select with the same register in both arms is reported" {
+    // `select R3, R2, [EQUAL], R5, R5` is decided by the instruction word alone:
+    // §3.2.2 selects bitwise between the arms, so one register named twice gives
+    // that register back whichever way the status falls. Running the two forms
+    // shows the same R3 (9) from the select and from the equivalent `mov`.
+    const source = "mov R1, 5\nmov R4, 7\nmov R5, 9\n" ++
+        "compare R2, R1, R4\nselect R3, R2, [EQUAL], R5, R5\nhalt\n";
+    try testing.expectEqual(@as(usize, 1), try findingsFor("sel.asm", source));
+}
+
+test "NEGATIVE: a select with two different arms is not reported" {
+    // The neighbouring correct program: identical except that the arms differ, so
+    // the status register genuinely decides the result. One character apart from
+    // the positive case above, which is what makes the pair evidence.
+    const source = "mov R1, 5\nmov R4, 7\nmov R5, 9\n" ++
+        "compare R2, R1, R4\nselect R3, R2, [EQUAL], R4, R5\nhalt\n";
+    try testing.expectEqual(@as(usize, 0), try findingsFor("sel_ok.asm", source));
+}
+
+test "a field.extract taking all 64 bits from bit 0 is reported" {
+    // §3.3: `(rs1 >> 0) & mask(64)` is `rs1`. Verified by running it: the
+    // destination receives exactly the source value.
+    try testing.expectEqual(
+        @as(usize, 1),
+        try findingsFor("ext.asm", "mov R1, 12345\nfield.extract R2, R1, offset=0, width=64\nhalt\n"),
+    );
+}
+
+test "NEGATIVE: a field.extract that actually slices is not reported" {
+    // Both neighbours are real slices: one drops the top 32 bits, the other drops
+    // bit 0. The rule keys on offset 0 AND width 64, not on either alone.
+    try testing.expectEqual(
+        @as(usize, 0),
+        try findingsFor("ext32.asm", "mov R1, 12345\nfield.extract R2, R1, offset=0, width=32\nhalt\n"),
+    );
+    try testing.expectEqual(
+        @as(usize, 0),
+        try findingsFor("ext63.asm", "mov R1, 12345\nfield.extract R2, R1, offset=1, width=63\nhalt\n"),
+    );
+}
+
+test "a field.insert replacing all 64 bits is reported" {
+    // §3.3: inserting 64 bits at offset 0 clears every bit of the base first, so
+    // the base register cannot reach the result. Verified by running it: the
+    // destination receives exactly the inserted register's value.
+    const source = "mov R1, 777\nmov R3, 424242\n" ++
+        "field.insert R2, R1, offset=0, width=64, R3\nhalt\n";
+    try testing.expectEqual(@as(usize, 1), try findingsFor("ins.asm", source));
+}
+
+test "NEGATIVE: a field.insert that keeps part of the base is not reported" {
+    // Width 63 at offset 0 leaves the base's top bit in the result, so the base
+    // register does reach it and the instruction is a real merge, not a `mov`.
+    const source = "mov R1, 777\nmov R3, 424242\n" ++
+        "field.insert R2, R1, offset=0, width=63, R3\nhalt\n";
+    try testing.expectEqual(@as(usize, 0), try findingsFor("ins63.asm", source));
+}
+
+test "the three degenerate-form rules are load-bearing, not decorative" {
+    // A rule can pass every negative test by never firing. Each positive case above
+    // is re-checked here against its own encoding: the rule keys on the fields the
+    // assembler actually wrote, and the positive and negative forms of each rule
+    // are different words rather than different source spellings of one word.
+    const sel = try assembled("select R3, R2, [EQUAL], R5, R5");
+    try testing.expectEqual(asmb.Opcode.select, opcodeOf(sel));
+
+    const whole = try assembled("field.extract R2, R1, offset=0, width=64");
+    try testing.expectEqual(asmb.Opcode.field_extract, opcodeOf(whole));
+    const ins = try assembled("field.insert R2, R1, offset=0, width=64, R3");
+    try testing.expectEqual(asmb.Opcode.field_insert, opcodeOf(ins));
+
+    // The positive and negative forms of the field rule are NOT the same word, so
+    // the two findings cannot be an artefact of one encoding being read twice.
+    const part = try assembled("field.extract R2, R1, offset=0, width=32");
+    try testing.expect(whole != part);
+    // And the select's two arms really are one register in the emitted word.
+    const sel_ok = try assembled("select R3, R2, [EQUAL], R4, R5");
+    try testing.expect(sel != sel_ok);
+}
+
+/// Assembles one instruction and returns its encoded word. Used to check that a
+/// rule's positive and negative forms really are different encodings rather than
+/// two spellings of one word. The word is returned by value, so nothing outlives
+/// the `Program` the way a slice would (docs/HANDOFF.md §4).
+fn assembled(line: []const u8) !u64 {
+    const source = try std.fmt.allocPrint(testing.allocator, "{s}\nhalt\n", .{line});
+    defer testing.allocator.free(source);
+    var a = asmb.Assembler.init(testing.allocator);
+    var d: asmb.Diagnostic = .{};
+    var program = a.assembleSource("one.asm", source, &d) catch {
+        a.deinit();
+        return error.AssemblyFailed;
+    };
+    defer program.deinit();
+    return program.words[0];
 }
 
 test "a finding is a warning, and it changes nothing the assembler emits" {

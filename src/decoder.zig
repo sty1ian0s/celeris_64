@@ -466,6 +466,15 @@ pub fn decode(word: u64) DecodeResult {
     const operand = operandOfWord(word);
 
     // §3.6: the accelerator range 0x60-0x8F is owned by matrix/fft/codec.
+    //
+    // DELIBERATELY NO REGISTRY LOOKUP HERE (amendment 1.20, resolves F37). A byte with
+    // no §3.6 row is reserved, and §3.6 clause 1 says it "decodes as an accelerator
+    // instruction with an unrecognised operation" — so decoding it successfully is the
+    // required behaviour, not an oversight. Clause 2 requires it to round-trip as raw
+    // bytes, which the disassembler does by falling back through this `.accelerator`
+    // arm; returning `.err` here would make that impossible. The SIMULATOR refuses a
+    // reserved opcode at execution (`Vm.refuseAccelerator`). A test below pins both
+    // halves, because "the decoder should reject it" is the natural, wrong reading.
     if (isAcceleratorByte(op_byte)) {
         // §3.6: reserved[39:32] must be zero. A non-zero value is a diagnostic
         // error, so the space stays available for future operands.
@@ -1685,4 +1694,32 @@ test "F15: the clean cap.check word named in the task decodes to R1, R2 exactly"
     try testing.expectEqual(@as(u8, 0x52), d.ok.cap_check.op);
     try testing.expectEqual(@as(u4, 1), d.ok.cap_check.rd);
     try testing.expectEqual(@as(u4, 2), d.ok.cap_check.rs1);
+}
+
+test "F37 / amendment 1.20: a RESERVED accelerator byte DECODES OK — the simulator refuses it" {
+    // This pins the decision, and it exists because the opposite reading is the
+    // natural one: "reserved" sounds like "the decoder rejects it". §3.6 clause 1
+    // says a reserved opcode "decodes as an accelerator instruction with an
+    // unrecognised operation", and clause 2 requires it to round-trip as raw bytes,
+    // which the disassembler can only do by falling through the `.accelerator` arm.
+    // So returning `.err` here would break the contract's own sentence.
+    //
+    // The refusal is the SIMULATOR's (Vm.refuseAccelerator), pinned by
+    // vm.zig's "a RESERVED §3.6 byte still refuses DIFFERENTLY from a defined one".
+    // If a future change makes this test fail, do not "fix" it by teaching the
+    // decoder the registry — read amendment 1.20 in docs/isa-encoding.md §3.6 first.
+    //
+    // 0x6F has no §3.6 row. 0x6E and 0x70 do, so it must not become either.
+    const reserved: u64 = (@as(u64, 0x6F) << 56) | @as(u64, 0x1234);
+    const d = decode(reserved);
+    try testing.expect(d == .ok);
+    try testing.expectEqual(@as(u8, 0x6F), d.ok.accelerator.opcode);
+    // Every bit of the operand survives, so the word can be re-emitted unchanged.
+    try testing.expectEqual(@as(u48, 0x1234), d.ok.accelerator.operand);
+
+    // A byte in the range WITH a row decodes to the same union tag — the decoder
+    // makes no reserved/defined distinction, which is the whole point of this test.
+    const defined = decode((@as(u64, 0x60) << 56));
+    try testing.expect(defined == .ok);
+    try testing.expect(std.meta.activeTag(defined.ok) == std.meta.activeTag(d.ok));
 }

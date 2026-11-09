@@ -40,6 +40,35 @@
 //!     needs path reachability that `call`/`ret`/`thread.*` leave unknown.
 //!   - "a `store` with no matching `load`". A program may legitimately exit by
 //!     storing, and nothing in the encoding says which addresses a program owns.
+//!   - "an instruction repeated verbatim elsewhere in the program". `matmul_8x8`
+//!     repeats `mov R7, R4` / `mul R7, R7, 64` / `mul R10, R10, 8` / `add R7, R7,
+//!     R10` in its `k_loop` and again in its store-address block; both copies are
+//!     correct and the repeat is what the two identical address computations ARE.
+//!     The rule fired thirteen times on correct programs and was deleted.
+//!   - "a register written and then overwritten by the very next instruction".
+//!     `tests/crosscheck/p1_zeroext.asm` is a chain of exactly that — `mov R0,
+//!     134217727` then `mov R0.w, 65535` then `mov R0.l, ...` then `mov R0.b, ...` —
+//!     and it is the zero-extension cross-check program, whose whole point is to
+//!     write R0 five times in a row. The shape says nothing about whether the
+//!     intermediate values mattered.
+//!   - "a write to R0 is a write to a hardwired zero register". R0 is an ordinary
+//!     general-purpose register in this architecture (§2.1 lists ZERO as a separate
+//!     system register, expressed by OMITTING a write target, §4). `p1_zeroext.asm`
+//!     and `p2_aluimm.asm` both write R0 as their destination and are correct.
+//!   - "a control transfer to an address outside this source". `tests/mulout_e2e.sh`
+//!     deliberately assembles `jump 400000` as its mismatch trap: leaving the image
+//!     faults loudly, which is what that program WANTS. §2.3 makes a flat image's
+//!     cells addressable, so an out-of-range target is a legal program shape.
+//!   - "a `branch` that tests a status `compare` cannot produce near it". §3.2.1's
+//!     `compare` yields EQUAL/LESS/GREATER, so UNSIGNED_LESS/UNSIGNED_GREATER look
+//!     unreachable; but the tested register may be written by any earlier
+//!     instruction on any path, and `count_rises` legitimately pairs a `compare`
+//!     with `[GREATER]` — adjacent in the listing, which is NOT adjacent at run
+//!     time, because `call`, `ret`, `jump` and `thread.*` all move control.
+//!   - "a `select` whose arms are one register", "a `field.extract` at offset 0
+//!     width 64" and "a `field.insert` at offset 0 width 64" ARE reported: each is
+//!     decided by the instruction word alone, and none appears in any program this
+//!     repository ships. They are the first three rules below.
 
 const std = @import("std");
 const diag = @import("diagnostics.zig");
@@ -87,6 +116,10 @@ pub fn analyze(insns: []const Analyzed, file: []const u8) Findings {
     var out = Findings{};
     for (insns, 0..) |a, i| {
         transferToNext(a, i, file, &out);
+        // Every rule here reads ONE instruction and nothing else, so none of them
+        // needs a second pass, a worklist, or any state that outlives this loop.
+        degenerateSelect(a, file, &out);
+        degenerateField(a, file, &out);
     }
     return out;
 }
@@ -138,6 +171,44 @@ fn transferToNext(a: Analyzed, i: usize, file: []const u8, out: *Findings) void 
 
 fn indexAddress(index: usize) u64 {
     return @as(u64, @intCast(index)) * insn_bytes;
+}
+
+/// A `select` whose two arms name the SAME register.
+///
+/// §3.2.2 selects bitwise: `result = (true & mask) | (false & ~mask)`. When both
+/// arms are one register every bit of the result comes from it whichever way the
+/// mask falls, so the instruction equals a `mov` of that register and the status
+/// register it tests cannot affect anything the program does. `select.zig`'s
+/// `select()` is the model: with `true_value == false_value` the two masked halves
+/// are complementary parts of one 64-bit value, so their union is that value.
+///
+/// Only the register INDICES are compared, which is exactly what the instruction
+/// word carries. Two different instructions that would compute the same value are
+/// not this: the rule needs the same register named twice, not an equality argument.
+fn degenerateSelect(a: Analyzed, file: []const u8, out: *Findings) void {
+    if (a.insn.opcode != .select) return;
+    if (a.insn.true_reg != a.insn.false_reg) return;
+    add(out, diag.selectSameArms(file, a.line, a.text));
+}
+
+/// `field.extract` at offset 0 width 64, and `field.insert` at offset 0 width 64.
+///
+/// §3.3 defines `extract` as `(rs1 >> offset) & mask(width)` and `insert` as `rs1`
+/// with `width` bits of `src2` placed at `offset`. At offset 0 the mask is the whole
+/// 64-bit word (§3.3.1 permits width 64, and `field.zig`'s `mask(64)` is all ones),
+/// so `extract` returns its source unchanged and `insert` clears every bit of its
+/// base before writing, returning the inserted value. Both are decided by the
+/// instruction word alone; neither reads anything the analyzer cannot see.
+///
+/// Width 64 at a NON-zero offset cannot be assembled — §3.3.1 refuses `offset +
+/// width > 64` — so offset 0 is the only place this shape exists.
+fn degenerateField(a: Analyzed, file: []const u8, out: *Findings) void {
+    if (a.insn.field_offset != 0 or a.insn.field_width != 64) return;
+    switch (a.insn.opcode) {
+        .field_extract => add(out, diag.extractIdentity(file, a.line, a.text)),
+        .field_insert => add(out, diag.insertIdentity(file, a.line, a.text)),
+        else => {},
+    }
 }
 
 // ---------------------------------------------------------------------------

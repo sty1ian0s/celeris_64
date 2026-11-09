@@ -421,6 +421,53 @@ pub fn transferToNext(file: []const u8, line: usize, text: []const u8, expected:
     };
 }
 
+/// A `select` whose two arms name the SAME register. §3.2.2 selects bitwise between
+/// the two arms, so when both arms are one register every bit of the result comes
+/// from it whatever the status is: the instruction is a `mov` and the status
+/// register is not consulted.
+pub fn selectSameArms(file: []const u8, line: usize, text: []const u8) Diagnostic {
+    return .{
+        .severity = .warning,
+        .file = file,
+        .line = line,
+        .finding = "selects between two arms that name the same register",
+        .offending = text,
+        .expected = "two different registers for the true and false arms, because a selection between one value and itself is the same value whichever arm the status chooses",
+        .detail = "The result is always the register both arms name, so this instruction is a `mov` and the status register it tests cannot affect the program. Usually one arm was meant to be a different register.",
+    };
+}
+
+/// A `field.extract` that takes the whole register: offset 0, width 64. §3.3
+/// extracts `(rs1 >> offset) & mask(width)`, and the width-64 mask is every bit, so
+/// the result is the source register unchanged.
+pub fn extractIdentity(file: []const u8, line: usize, text: []const u8) Diagnostic {
+    return .{
+        .severity = .warning,
+        .file = file,
+        .line = line,
+        .finding = "extracts the whole source register and puts it back unchanged",
+        .offending = text,
+        .expected = "a width below 64, or a `mov` when the whole register is what was wanted, because an extraction of every bit starting at bit 0 is its own source",
+        .detail = "Offset 0 with width 64 takes all 64 bits starting at bit 0, so the destination receives exactly the source. §3.3's primitive exists to slice a field out of a wider value; a full-width slice at offset 0 slices nothing.",
+    };
+}
+
+/// A `field.insert` that replaces the whole destination: offset 0, width 64. §3.3
+/// inserts `width` bits of `src2` at `offset`, and clearing then filling every bit
+/// leaves exactly the inserted value, so the result is `src2` and the base register
+/// is not consulted.
+pub fn insertIdentity(file: []const u8, line: usize, text: []const u8) Diagnostic {
+    return .{
+        .severity = .warning,
+        .file = file,
+        .line = line,
+        .finding = "inserts a value into every bit of the destination, so the destination's previous contents are discarded",
+        .offending = text,
+        .expected = "a width below 64, or a `mov` when the whole register is what was wanted, because inserting all 64 bits at bit 0 clears every bit the base register held",
+        .detail = "Offset 0 with width 64 clears all 64 bits of the destination before writing the inserted value, so the result is exactly that value and the base register it was inserted into does not reach the result.",
+    };
+}
+
 /// A label written on the line of an instruction that cannot be a transfer target.
 /// `text` is the whole line (the label and its instruction), because that is what
 /// the reader has to look at to see the problem.
@@ -476,6 +523,9 @@ test "no diagnostic constructor emits a bare hex token" {
         // value, and must be as free of bare hex as an error is.
         transferToNext("t.asm", 3, "jump done", "no control transfer at all, because this one lands on the instruction that already follows it"),
         lostLabel("t.asm", 4, "copy: mov R0, R1", "a label on its own line above a jump, call or branch"),
+        selectSameArms("t.asm", 5, "select R3, R2, [EQUAL], R5, R5"),
+        extractIdentity("t.asm", 6, "field.extract R2, R1, offset=0, width=64"),
+        insertIdentity("t.asm", 7, "field.insert R2, R1, offset=0, width=64, R3"),
     };
     for (cases) |c| {
         const text = renderToBuffer(c, &buf);

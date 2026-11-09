@@ -3145,8 +3145,11 @@ test "a RESERVED §3.6 byte still refuses DIFFERENTLY from a defined one" {
     // CONTRADICTS THE ORIGINAL TASK BRIEF, and still true: the brief said a reserved
     // byte "must keep hitting the fault path" as though the DECODER rejected it. It
     // does not — `decoder.decode` accepts every byte in 0x60-0x8F as `.accelerator`
-    // (decoder.zig:469-485 has no table lookup). So the distinction is made HERE, by
-    // the §3.6 registry lookup. Recorded as F37.
+    // with no table lookup, and amendment 1.20 (§3.6) now states that this is REQUIRED,
+    // not an oversight: clause 2's raw-byte round-trip depends on it. So the refusal is
+    // made HERE, by the §3.6 registry lookup. F37 is resolved by amendment 1.20; see
+    // docs/STATUS.md F37 and the pinning test in decoder.zig, which must keep agreeing
+    // with this one.
     const reserved = try imageWith(&.{accelWord(0x6F, 1, 2, 0, 0, 0)});
     defer testing.allocator.free(reserved);
     var a = Vm.init(reserved);

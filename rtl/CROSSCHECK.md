@@ -305,11 +305,28 @@ innocent; the testbench was destroying its own program. Data now lives at 0x100.
 
 | Group | What it pins | Result |
 |---|---|---|
-| **P5, P6** | §3.6 operand decode; **all 13 normative opcodes recognised, all 35 reserved bytes rejected**; `not_implemented` vs `unknown_op` distinguished | PASS |
+| **P5, P6** | §3.6 operand decode; **all 13 normative opcodes recognised, all 35 reserved bytes rejected**; `not_implemented` vs `unknown_op` distinguished. **STALE — see the note below the table.** | PASS |
 | **P7** | §3.1 v1.2 regression: bit 39 set + bit 27 clear ⇒ **register** form, reserved field flagged | PASS |
 | **P8** | Per-sub-field slicing for §3.0/§3.1/§3.2.2/§3.3/§3.4/§3.6 | PASS |
 | **P9** | §7 named diagnostics: divide-by-zero, reserved width, zero chunk, zero field width — each stops the machine and **writes nothing** | PASS |
 | **P10** | §3.2.1 `compare` materialises the status enum (`LESS=1`), not a bare boolean | PASS |
+
+> **STALE COVERAGE NOTE (F40, recorded 2026-11-09 — not yet fixed).** The P5/P6 row
+> above is accurate as a record of what the testbench *asserts*, and it still passes —
+> but the table it asserts is **one opcode behind the contract**. Amendment 1.19 added
+> a fourteenth §3.6 opcode, `matrix.mulout` (0x65), so the contract now has **14
+> recognised / 34 reserved** bytes in `0x60`–`0x8F` (48 bytes total), while
+> `rtl/tb/core_tb.sv:1040-1042`, `rtl/accel.sv:120-130` and
+> `rtl/pkg/celeris64_pkg.sv:152-155` still encode **13 / 35**.
+>
+> The run confirms this rather than exposing it: the testbench is **green, 159/159,
+> exit 0**, and prints `all 13 normative opcodes recognised (13), 35 reserved rejected`.
+> `check_recognised_table()` calls 0x65 reserved *because the testbench encodes the old
+> table*, so a check written to catch exactly this cannot see it. **Nothing in `rtl/`
+> fails — the table it asserts is what disagrees with `docs/isa-encoding.md` §3.6.**
+>
+> Until F40 is closed, **do not read this row as "the RTL matches the contract"**: it
+> matches the v1.18 contract. Full write-up in `docs/STATUS.md` F40.
 
 ---
 

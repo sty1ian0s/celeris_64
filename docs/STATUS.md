@@ -1729,8 +1729,61 @@ review that found defect 1.
 
 ## F37: the decoder does not reject a reserved accelerator byte (F8 shape, again)
 
-**Found** while implementing F36, by the teammate wiring it. **Status: open.** Not
-fixed, because `src/decoder.zig` is outside that change's scope.
+**Found** while implementing F36, by the teammate wiring it.
+
+> **RESOLVED (amendment 1.20) — the decoder is RIGHT and the contract's wording was
+> ambiguous. The finding as first written is partly retracted below, in place.**
+>
+> The entry offered two options and said both were defensible. **Only one survives
+> contact with the rest of the contract and the suite**, and the deciding evidence was
+> already in the tree when the finding was written:
+>
+> - `src/disassembler.zig:552` has a **passing, load-bearing** test — *"a RESERVED
+>   accelerator opcode round-trips as raw bytes, not as a neighbour"* — which requires
+>   `decode` to return `.ok` for a reserved byte. The disassembler reaches its `.raw`
+>   fallback **only** through the `.accelerator` arm
+>   (`disassembler.zig:109` → `accelerator`, `disassembler.zig:117-125`). Making the
+>   decoder return `.err`, option (a), breaks that test.
+> - §3.6's own sentence has three clauses. Clause 1 ("decodes as an accelerator
+>   instruction with an unrecognised operation") and clause 2 ("must round-trip as raw
+>   bytes") both **require** a successful decode. Option (a) contradicts the sentence
+>   it was meant to satisfy.
+>
+> So option (b) was not merely "cheaper and matching the code" — it is the only reading
+> under which §3.6 is self-consistent. **Amendment 1.20** writes the three clauses out
+> normatively in §3.6 and names the layer for each: the decoder accepts (and must not
+> be changed), the bytes round-trip as `.raw`, and the **simulator** refuses at
+> execution — a fault, not a decode error.
+>
+> **Part of the original finding is retracted.** It described the decoder's behaviour
+> as "a rule enforced in one layer while another path reaches the same input ungoverned"
+> — the **F8 shape**. That framing was wrong: no rule was being bypassed, because §3.6
+> never required a decode error. The decoder is not an ungoverned path; it is the
+> governed one, doing exactly what clause 1 specifies. What was genuinely missing was a
+> statement of *which layer owns the refusal*, and the ambiguity is what made the
+> decoder look ungoverned.
+>
+> **Pinned so it cannot regress, in two places that must agree:**
+> - `src/decoder.zig` — *"F37 / amendment 1.20: a RESERVED accelerator byte DECODES OK
+>   — the simulator refuses it"*, with a comment at the `.accelerator` arm saying the
+>   absent registry lookup is deliberate and pointing at amendment 1.20.
+> - `src/vm.zig` — *"a RESERVED §3.6 byte still refuses DIFFERENTLY from a defined
+>   one"*, which already asserted the simulator half.
+>
+> **Load-bearing, proven by mutation in a throwaway copy** (never the shared tree):
+> making the decoder return `.err` for `0x6F` — exactly option (a) — makes the new test
+> fail with `reached unreachable code` and the test process abort. Reverted in the copy;
+> the shared tree was never mutated.
+>
+> **What may and may not be said.** May be said: the contract now names the refusing
+> layer for all three clauses, and both layers are pinned by tests. May **not** be said:
+> that a reserved opcode is rejected at decode time — it is not, and amendment 1.20 says
+> so. This resolution changes **no encoding**: no bit moved and no opcode was added.
+
+### The original entry, kept for the record
+
+**Status at the time: open.** Not fixed, because `src/decoder.zig` is outside that
+change's scope.
 
 `docs/isa-encoding.md` §3.6 says: *"An opcode in `0x60`–`0x8F` that is not in this
 table is **reserved**: it decodes as an accelerator instruction with an unrecognised
@@ -1886,3 +1939,100 @@ falsification machinery. A verdict that reports a confirmed expectation as faile
 the mirror of the defect this whole suite exists to avoid — and it was one line, in
 the reporting layer, invisible to every equivalence test because the *programs* were
 all correct. The equivalence checks were sound; the summary was not.
+
+---
+
+## F40: the RTL still says 0x65 is reserved, and its testbench asserts it
+
+**Found** by the Lead while checking `rtl/` for consistency after amendment 1.20.
+**Status: open.** Not fixed, because it needs an RTL change plus a re-run of the
+Verilator testbench, and the contract question it raises should be settled first.
+
+**Amendment 1.19 added a fourteenth §3.6 opcode, `matrix.mulout` (0x65), to the
+contract and to the simulator — and nothing in `rtl/` was touched.** The RTL still
+encodes the v1.18 table, which is 13 opcodes. The §3.6 range is 48 bytes wide
+(`0x60`–`0x8F`), so the counts move with it:
+
+| | recognised | reserved |
+|---|---|---|
+| Contract, after 1.19 | **14** | **34** |
+| `rtl/accel.sv` and `rtl/tb/core_tb.sv` | 13 | 35 |
+
+Three places disagree with the contract, and the third is the serious one:
+
+1. `rtl/pkg/celeris64_pkg.sv:152-155` has no `OP_MATRIX_MULOUT` constant at all.
+2. `rtl/accel.sv:120-130` lists 13 opcodes in its `unique case`, and the comment
+   directly above it at **line 117-118** reads: *"a range check would report 0x65
+   (reserved) as recognised because 0x64 is"* — it names 0x65 as its example of a
+   reserved byte.
+3. `rtl/tb/core_tb.sv:1040-1042` encodes the table as
+   `(b <= 8'h64) || (b >= 8'h70 && b <= 8'h73) || (b >= 8'h80 && b <= 8'h83)`, and
+   `check_recognised_table()` then **fails any byte in that list that decodes as
+   recognised**. So the RTL testbench does not merely omit 0x65 — it **asserts that
+   0x65 must raise `unknown_op`**, which is now the opposite of the contract. Its
+   `$display` at line 1061 prints "all 13 normative opcodes recognised ... 35 reserved
+   rejected", which is a stale count presented as a passing result.
+
+This is the **F8 shape** for the third time in this file (see F24/F27 and F37): a rule
+enforced in one layer while another layer reaches the same input differently. Here the
+layers are the contract and the RTL rather than the assembler and the decoder, and the
+RTL is the one that is now wrong.
+
+**Why it did not show up.** `rtl/tb/core_tb.sv` is not part of `zig build test`. The
+RTL is exercised only by an explicit Verilator run, which the v1.19 change did not make,
+because v1.19 touched only `docs/isa-encoding.md`, `src/assembler.zig`,
+`src/disassembler.zig`, `src/vm.zig` and `tests/mulout_e2e.sh` — all of them outside
+`rtl/`. So every gate that ran for v1.19 was green while the RTL silently disagreed with
+the contract that v1.19 had just amended. **A green `zig build test` says nothing about
+`rtl/`.**
+
+**What closing it needs — and the decision it contains.** The mechanical part is easy:
+add `OP_MATRIX_MULOUT = 8'h65` to the package, add it to `accel.sv`'s recognition case,
+change the testbench's table to `(b <= 8'h65) || ...`, and update the two counts to
+14/34. The part that needs a decision is **what the RTL should do with 0x65**: v1.19
+made `matrix.mulout` *execute in the simulator*, while every other accelerator in the
+RTL is **decode-only** (`rtl/CROSSCHECK.md` §4/§5.7: `result_valid_o` tied low, no
+fabricated answer, because §3.6 calls the behaviour "a software model"). So either
+
+- (a) the RTL recognises 0x65 and raises `not_implemented` like the other 13 — cheap,
+  consistent with the existing decode-only contract, and honest; or
+- (b) the RTL gains a matrix datapath — a large change that would make it the only
+  accelerator with one, unevenly, and is exactly what the previous handoff warned
+  against ("Do **not** build matrix/FFT/codec datapaths in SystemVerilog to 'complete'
+  this").
+
+**Option (a) is the one that matches the repository's stated position**, but it is a
+real choice and picking it silently is what F37 taught this file not to do. Recorded
+rather than patched.
+
+**What may and may not be said.** May be said: the RTL and its testbench encode the
+13-opcode table and the contract now has 14, verified by reading all three sites above.
+
+**CONFIRMED BY RUNNING, and the result is subtler than "it fails".** The core testbench
+was built with Verilator 5.49 to a fresh path (the stale-binary trap in
+`rtl/CROSSCHECK.md` §2.3 was avoided by using a new `-o` target and checking the build's
+exit status first) and executed:
+
+```
+ok §3.6 all 13 normative opcodes recognised (13), 35 reserved rejected
+=== checks=159 failures=0 ===
+PASS: all 159 core vectors matched (simulation only; RTL is NOT timing-closed, NOT on silicon)
+```
+
+So the testbench is **green, exit 0, 159/159** — and that is the finding, not a
+refutation of it. `check_recognised_table()` classifies 0x65 as reserved *because the
+testbench itself encodes the old table*, so the check that exists to catch exactly this
+disagreement cannot see it. **The RTL does not fail; it passes while contradicting the
+contract**, which is the same shape as F31 in this file (assertions that could never
+fail) and is strictly harder to notice than a red test. A fix must therefore change the
+expected table *and* confirm the new table is load-bearing — the current run cannot
+distinguish "0x65 is correctly reserved" from "0x65 is wrongly reserved", because
+nothing in `rtl/` knows the contract changed.
+
+May **not** be said: that anything is red, or that the RTL is broken in synthesis. The
+RTL synthesises and its testbench passes; what is wrong is the *table it asserts*, and
+that is only visible against `docs/isa-encoding.md` §3.6 — not against itself.
+
+**This is the second time in this session that a green gate hid a disagreement** (F37's
+decoder was the first). Both were found by asking what a passing check actually
+*asserts*, not by watching for failure.
