@@ -7,7 +7,7 @@
 //! "does it stay silent on code that is KNOWN to be correct" — and that claim has to
 //! be re-checked whenever a rule is added or changed.
 //!
-//! The programs here are the six CLS64 kernels of the cross-architecture example
+//! The programs here are the CLS64 kernels of the cross-architecture example
 //! suite (`src/examples.zig`), each of which `examples.measureExample` verifies to
 //! compute the same answer as its RISC-V, AArch64 and x86-64 counterparts, and the
 //! cross-check programs in `tests/crosscheck/`. Every one is a correct program; a
@@ -56,14 +56,25 @@ fn findingsFor(name: []const u8, source: []const u8) !usize {
     }
     return findings.len;
 }
-test "the six example kernels produce no findings" {
+test "the example kernels produce no findings" {
     // If this fails, the ANALYZER is wrong, not the kernel: each of these is
     // executed by the example suite and checked against a reference answer and
     // three other ISA implementations (src/examples.zig, `measureExample`).
+    //
+    // The loop walks whatever `examples.examples` holds, so a NEW kernel is covered
+    // the moment it is added. That is deliberate: this test was named "the six
+    // example kernels" and said the same in three comments elsewhere, and had been
+    // wrong for two kernels without anyone noticing, because prose counts are checked
+    // by nothing. The iteration cannot drift; the number could.
     var total: usize = 0;
+    var covered: usize = 0;
     for (&examples.examples) |*ex| {
+        covered += 1;
         total += try findingsFor(ex.name, ex.cls64);
     }
+    // A test that silently covered nothing would also pass. Assert the corpus is not
+    // empty or renamed out from under us.
+    try testing.expect(covered >= 8);
     try testing.expectEqual(@as(usize, 0), total);
 }
 

@@ -331,7 +331,7 @@ test "NEGATIVE: a negative branch offset is not confused with one instruction" {
 test "NEGATIVE: no finding on any CLS64 program this repository ships" {
     // The claim this module exists to keep is that a finding is never raised on a
     // correct program. Every CLS64 program in the repository is assembled here and
-    // must produce zero findings: the six example kernels (src/examples.zig), the
+    // must produce zero findings: the example kernels (src/examples.zig), the
     // four cross-check programs (tests/crosscheck/), and the programs the shell
     // scripts in tools/ drive. A regression in any rule shows up as the name below.
     const cases = [_]struct { name: []const u8, src: []const u8 }{

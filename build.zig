@@ -224,9 +224,12 @@ pub fn build(b: *std.Build) void {
     const crossarch_run = b.addRunArtifact(crossarch_exe);
     b.step("crossarch", "Compare the workload across four ISAs (no timing claims)").dependOn(&crossarch_run.step);
 
-    // Cross-architecture EXAMPLE SUITE: six kernels, four ISAs, each verified to
-    // compute the same thing before its row is printed. Reports retired
-    // instructions and encoded bytes; reports no timing quantity, by design.
+    // Cross-architecture EXAMPLE SUITE: every kernel in src/examples.zig, four ISAs,
+    // each verified to compute the same thing before its row is printed. Reports
+    // retired instructions and encoded bytes; reports no timing quantity, by design.
+    // The kernel count is deliberately NOT written here: this comment read "six
+    // kernels" while the array held eight, because a number in prose is checked by
+    // nothing. The array is the source of truth.
     const examples_mod = b.createModule(.{
         .root_source_file = b.path("src/examples.zig"),
         .target = target,
@@ -245,7 +248,7 @@ pub fn build(b: *std.Build) void {
     b.step("examples", "Run the cross-architecture example suite (no timing claims)").dependOn(&examples_run.step);
 
     // The static analyzers' no-false-positive contract, checked against the programs
-    // this repository ships: the six example kernels and the cross-check programs.
+    // this repository ships: the example kernels and the cross-check programs.
     // Each must produce ZERO findings — the claim that matters most for an analyzer,
     // and one no inline test of src/assembler.zig can make, because the kernels live
     // in examples.zig, which the assembler cannot import (it pulls in the VM).
