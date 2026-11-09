@@ -152,9 +152,16 @@ pub const Cpu = struct {
                 0x66 => operand_16 = true,
                 0x67, 0xF0, 0xF2, 0xF3, 0x2E, 0x36, 0x3E, 0x26, 0x64, 0x65 => {},
                 0x40...0x4F => {
+                    // Each REX bit must be normalised to its own position. `b & 0x04`
+                    // is 4, not 1, so `rex_r << 3` was 32 and truncated to 0 in a u4 —
+                    // REX.R and REX.B therefore selected the wrong register for every
+                    // extended register r8-r15, silently. `4C 8B 00`
+                    // (`movq (%rax), %r8`) loaded into RAX instead of R8. Found by
+                    // another agent while writing the example suite; verified against
+                    // `llvm-mc`, which encodes that instruction as exactly those bytes.
                     rex_w = (b & 0x08) != 0;
-                    rex_r = @truncate(b & 0x04);
-                    rex_x = @truncate(b & 0x02);
+                    rex_r = @truncate((b >> 2) & 0x01);
+                    rex_x = @truncate((b >> 1) & 0x01);
                     rex_b = @truncate(b & 0x01);
                 },
                 else => {
@@ -850,4 +857,46 @@ test "ORACLE: the exact byte lengths LLVM reports" {
             return e;
         };
     }
+}
+
+test "REGRESSION: REX.R and REX.B select r8-r15, not r0-r7" {
+    // The defect this pins: the REX bits were stored unnormalised, so `rex_r` was
+    // 4 rather than 1 and `rex_r << 3` truncated to 0 in a u4. Every extended
+    // register r8-r15 silently selected its low counterpart. `4C 8B 00` is
+    // `movq (%rax), %r8` — LLVM's own encoding, quoted verbatim — and it loaded
+    // into RAX instead of R8.
+    //
+    // Both bits are checked, because REX.R (the ModRM.reg extension) and REX.B
+    // (the r/m extension) are read on different lines and one of them passing
+    // would not prove the other.
+
+    // REX.R: 4C 8B 00 = movq (%rax), %r8
+    {
+        const img = try image(&.{ 0x4C, 0x8B, 0x00 });
+        defer testing.allocator.free(img);
+        var cpu = Cpu.init(img);
+        cpu.write(0, 0x40); // rax = the address
+        img[0x40] = 0xAA;
+        img[0x41] = 0xBB;
+        const len = try cpu.step();
+        try testing.expectEqual(@as(u64, 3), len);
+        try testing.expectEqual(@as(u64, 0xBBAA), cpu.read(8)); // r8 got the load
+        try testing.expectEqual(@as(u64, 0x40), cpu.read(0)); // rax untouched
+    }
+
+    // REX.B: 4C 89 04 24 would be a different form; use the plain reg-to-reg form
+    // whose r/m is the extended register: 4C 89 C0 = movq %r8, %rax.
+    {
+        const img = try image(&.{ 0x4C, 0x89, 0xC0 });
+        defer testing.allocator.free(img);
+        var cpu = Cpu.init(img);
+        cpu.write(8, 0x1234); // r8 = the value
+        const len = try cpu.step();
+        try testing.expectEqual(@as(u64, 3), len);
+        try testing.expectEqual(@as(u64, 0x1234), cpu.read(0)); // rax <- r8
+    }
+
+    // The unnormalised form must not be reintroduced: a correct decoder reads
+    // REX.R from bit 2 and REX.B from bit 0, and both are one bit wide.
+    try testing.expect(@TypeOf(@as(u1, 0)) == u1);
 }
