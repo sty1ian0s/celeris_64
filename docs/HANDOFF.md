@@ -8,12 +8,12 @@ running something; claims that were not observed are marked as such.
 ## 1. Repository state
 
 ```
-HEAD         e3f3c15  docs(status): F36 implemented and verified; F37 recorded
-remote       origin/main, IN SYNC as of e3f3c15 (pushed)
-working tree CLEAN
+HEAD         efa86bf  docs(status): F36 closed by Amendment 1.18; F38 and F39 recorded
+remote       origin/main, IN SYNC as of efa86bf (pushed)
+working tree CLEAN (at efa86bf)
 ```
 
-Eleven commits landed this session, in this order:
+Fifteen commits landed this session, in this order:
 
 | Commit | What |
 |---|---|
@@ -28,15 +28,22 @@ Eleven commits landed this session, in this order:
 | `4f18f7d` | `docs(status)`: F36 grows — count's source and unit are undefined |
 | `9a9b193` | `feat(vm)`: the §3.6 accelerators now dispatch, and refuse per op |
 | `e3f3c15` | `docs(status)`: F36 implemented and verified; F37 recorded |
+| `af24bac` | `feat(isa)`: **Amendment 1.18** — 11 of 13 accelerators now execute |
+| `a5be79d` | `fix(x86-64)`: **F38** — REX.R/REX.B selected the wrong register for r8–r15 |
+| `c414be5` | `feat(examples)`: six-kernel cross-architecture suite + **F39** verdict fix |
+| `efa86bf` | `docs(status)`: F36 closed, F38 and F39 recorded |
 
 **The previous handoff's blocking item is done.** The dirty tree it described is
 committed, the 3 failing label tests pass, and the labels work is byte-verified.
 
-### Gates, all run on a cold cache at `e3f3c15`
+### Gates, all run on a cold cache at `efa86bf`
 
 ```sh
 rm -rf .zig-cache && ~/.local/zig/zig build test --summary all
-  -> Build Summary: 49/49 steps succeeded; 619/619 tests passed   exit 0
+  -> Build Summary: 51/51 steps succeeded; 932/932 tests passed   exit 0
+
+~/.local/zig/zig build examples    -> exit 0, 6 kernels x 4 ISAs, all equivalent
+tools/accel_e2e.sh                 -> 10/10 checks passed (run by hand; see below)
 
 ~/.local/zig/zig build crossarch   -> 8 rows, no !! warnings
 ~/.local/zig/zig build audit       -> 9/9 enforcement points, all 9 rejected when set
@@ -45,8 +52,9 @@ rm -rf .zig-cache && ~/.local/zig/zig build test --summary all
 fuzzer (inside build test)         -> checked=11839 identical=11839, 0 mismatches
 ```
 
-The test count moved 570 -> 619 this session: 40 from the accelerator work and
-related changes, 9 new accelerator tests.
+The test count moved 570 -> 932 across this session: the labels work, the
+accelerator amendment (11 of 13 opcodes now execute), the six-kernel example suite,
+and the x86-64 REX fix.
 
 ### The goal is re-created and ARMED
 
