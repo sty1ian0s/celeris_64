@@ -115,12 +115,18 @@ module accel
   // being read as the next operation down — the alias bug Amendment 1.1 closed.
   //
   // The list is deliberately exhaustive rather than a range check: a range check
-  // would report 0x65 (reserved) as recognised because 0x64 is.
+  // would report a reserved byte as recognised because its neighbour is.
+  //
+  // 0x65 `matrix.mulout` was added by amendment 1.19 and is RECOGNISED here as of
+  // amendment 1.20's follow-up (F40). It is decode-only like the other thirteen:
+  // §3.6 calls these operations a *software model*, so the RTL recognises the opcode
+  // and raises not_implemented_o rather than fabricating a product. It is NOT given
+  // a datapath — rtl/CROSSCHECK.md §4/§5.7 records that choice deliberately.
   //---------------------------------------------------------------------------
   always_comb begin
     unique case (opcode_i)
       OP_MATRIX_DET, OP_MATRIX_INVERT, OP_MATRIX_MUL,
-      OP_MATRIX_TRANSFORM, OP_MATRIX_IDENTITY,
+      OP_MATRIX_TRANSFORM, OP_MATRIX_IDENTITY, OP_MATRIX_MULOUT,
       OP_FFT_FORWARD, OP_FFT_INVERSE, OP_FFT_NTT, OP_FFT_NTT_INVERSE,
       OP_CODEC_COMPRESS, OP_CODEC_DECOMPRESS, OP_CODEC_FNV1A, OP_CODEC_CHECKSUM16:
         op_recognised_o = 1'b1;

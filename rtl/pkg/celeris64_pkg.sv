@@ -152,6 +152,7 @@ package celeris64_pkg;
     OP_MATRIX_MUL       = 8'h62,
     OP_MATRIX_TRANSFORM = 8'h63,
     OP_MATRIX_IDENTITY  = 8'h64,
+    OP_MATRIX_MULOUT    = 8'h65,
     OP_FFT_FORWARD      = 8'h70,
     OP_FFT_INVERSE      = 8'h71,
     OP_FFT_NTT          = 8'h72,

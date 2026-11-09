@@ -1945,8 +1945,48 @@ all correct. The equivalence checks were sound; the summary was not.
 ## F40: the RTL still says 0x65 is reserved, and its testbench asserts it
 
 **Found** by the Lead while checking `rtl/` for consistency after amendment 1.20.
-**Status: open.** Not fixed, because it needs an RTL change plus a re-run of the
-Verilator testbench, and the contract question it raises should be settled first.
+
+> **CLOSED — fixed and verified by running the Verilator testbench, both directions.
+> The original entry is kept below.** The fix took the decision this entry named,
+> option (a): the RTL **recognises 0x65 and raises `not_implemented`** like the other
+> thirteen, staying uniformly decode-only. No matrix datapath was built.
+>
+> **Three sites changed:** `rtl/pkg/celeris64_pkg.sv` gained
+> `OP_MATRIX_MULOUT = 8'h65`; `rtl/accel.sv`'s exhaustive `unique case` gained it (and
+> its header comment, which had named 0x65 as the *example of a reserved byte*, now
+> explains the decode-only choice instead); `rtl/tb/core_tb.sv`'s
+> `check_recognised_table()` table changed from `(b <= 8'h64)` to `(b <= 8'h65)`.
+>
+> **Verified by running, before and after:**
+>
+> | | result |
+> |---|---|
+> | Before the fix | `ok §3.6 all 13 normative opcodes recognised (13), 35 reserved rejected` — **PASS, 159/159, exit 0** |
+> | After the fix | `ok §3.6 all 14 normative opcodes recognised (14 observed), 34 reserved rejected` — **PASS, 159/159, exit 0** |
+> | Mutant (0x65 removed from `accel.sv`) | `FAIL §3.6 recognition table: expected 14 recognised / 34 reserved, got 13 recognised and 35 reserved` — **failures=1, exit 1** |
+>
+> The mutant run matters most: it proves the corrected table is **load-bearing**, and
+> that the before-fix PASS was a genuine blind spot rather than a latent failure.
+>
+> **A second defect found and fixed while closing this, in the same task.** The
+> closing `$display` printed `ok ... all 13 ... (13), 35 reserved` **unconditionally** —
+> it emitted the word "ok" and the *expected* count even when a byte had been
+> misclassified. Under mutation the old code therefore printed a passing line beside
+> the failure. That is the **F31 shape again**: a message that cannot fail. It now
+> counts what the RTL **actually** reports, separately from what the test expects,
+> and prints `ok` only when the count is right — the mutant output above is that
+> change working, reporting `13 recognised and 35 reserved` instead of the expected 14.
+>
+> **What may be said now:** the RTL's §3.6 recognition table matches the contract at
+> 14 recognised / 34 reserved, verified by executing the testbench, and the check that
+> asserts it fails when the table is wrong. **Still not claimed:** any timing, area or
+> silicon result, and the RTL remains decode-only for every accelerator — 0x65 included
+> — which is the documented choice, not a gap.
+
+### The original entry, kept for the record
+
+**Status at the time: open.** Not fixed, because it needs an RTL change plus a re-run
+of the Verilator testbench, and the contract question it raises should be settled first.
 
 **Amendment 1.19 added a fourteenth §3.6 opcode, `matrix.mulout` (0x65), to the
 contract and to the simulator — and nothing in `rtl/` was touched.** The RTL still

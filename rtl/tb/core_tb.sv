@@ -1027,9 +1027,11 @@ module core_tb
   //===========================================================================
   task automatic check_recognised_table();
     int unsigned recognised_count;
+    int unsigned actually_recognised;
     logic        expect_known;
     begin
       recognised_count = 0;
+      actually_recognised = 0;
       for (int unsigned b = 32'h60; b <= 32'h8F; b++) begin
         reset_core();
         image_clear();
@@ -1037,9 +1039,15 @@ module core_tb
         image_write64(0, (64'(b) << 56) | (64'd1 << 52) | (64'd2 << 48));
         step_instruction_discard();
 
-        // §3.6 table: 0x60-0x64, 0x70-0x73, 0x80-0x83.
-        expect_known = (b <= 8'h64) || (b >= 8'h70 && b <= 8'h73)
+        // §3.6 table: 0x60-0x65, 0x70-0x73, 0x80-0x83. The matrix group now runs
+        // to 0x65 because amendment 1.19 added `matrix.mulout`; the range is
+        // 0x60-0x8F (48 bytes), so 14 are recognised and 34 reserved.
+        expect_known = (b <= 8'h65) || (b >= 8'h70 && b <= 8'h73)
                     || (b >= 8'h80 && b <= 8'h83);
+        // Count what the RTL ACTUALLY reports, separately from what we expected.
+        // Reporting the expected count as if it were the observed one is what made
+        // the old unconditional "ok ... (13)" read as a pass under mutation.
+        if (lat_acc_recognised === 1'b1) actually_recognised++;
         if (expect_known) begin
           recognised_count++;
           if (lat_acc_recognised !== 1'b1) begin
@@ -1058,8 +1066,18 @@ module core_tb
         end
         checks++;
       end
-      $display("      ok §3.6 all 13 normative opcodes recognised (%0d), 35 reserved rejected",
-               recognised_count);
+      // The count is REPORTED, and the word "ok" is printed only when the count is
+      // actually right. The previous version printed "ok ... all 13 ... (13), 35
+      // reserved" unconditionally, so it read as a pass even when a byte had been
+      // misclassified — the F31 shape, a message that could not fail. The expected
+      // numbers are 14 and 34 for the 48-byte range 0x60-0x8F.
+      if (recognised_count == 14 && failures == 0) begin
+        $display("      ok §3.6 all 14 normative opcodes recognised (%0d observed), 34 reserved rejected",
+                 actually_recognised);
+      end else begin
+        $display("      FAIL §3.6 recognition table: expected 14 recognised / 34 reserved, got %0d recognised and %0d reserved",
+                 actually_recognised, 48 - actually_recognised);
+      end
     end
   endtask
 
