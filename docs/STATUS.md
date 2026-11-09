@@ -2105,16 +2105,32 @@ have been a kernel whose numbers were measured from a program that did a differe
 computation — the exact class of faked claim the suite exists to prevent.
 
 **The verified shape, so a successor does not re-derive it.** CLS64 *can* express the
-rotate, but the `_ .l` narrowing does not discard bits above 32 and `shl` does not
-truncate, so the round trip through a scratch word is load-bearing:
+rotate, but the round trip through a scratch word is load-bearing:
 
 ```
 shl -> store to a scratch word -> shr by 32 -> load the original -> or -> store back
 ```
 
 Removing the scratch-word round trip (the "obvious optimisation") silently stops the
-program being a rotate. It is expressible: `shl` = 0x17 and `shr` = 0x18 both exist in
-`src/assembler.zig` and dispatch in `src/decoder.zig`.
+program being a rotate.
+
+**Why the round trip is needed — and this is subtler than "CLS64 lacks a shift", which is
+wrong.** `shl` = 0x17 and `shr` = 0x18 both exist (`src/assembler.zig:201-202`, the enum at
+`src/decoder.zig:74-75`). But they are **full-width and saturating**, not `.l`-truncating:
+`src/vm.zig:1058-1059` reads
+
+```zig
+0x17 => if (rhs >= 64) 0 else lhs << @intCast(rhs),
+0x18 => if (rhs >= 64) 0 else lhs >> @intCast(rhs),
+```
+
+so the shift is computed over all 64 bits and a shift of 64 or more yields **zero** (it does
+not mask the count to six bits the way x86-64's `shl` does). Truncation happens only on the
+*write*, via `writeWidth` (`src/vm.zig:1066`), which zero-extends the upper bits. Meanwhile
+a multiply like x86-64's `imulq $8` **keeps** the high bits. So a CLS64 rotate built from
+bare shifts and an `or` puts the high bits somewhere the other three ISAs do not — the
+scratch-word store/load is what re-narrows the intermediate value. **The extra instructions
+are a correctness requirement, not a stylistic choice.**
 
 ### Measured, by running the repo's own decoders — and a warning about llvm-mc
 
