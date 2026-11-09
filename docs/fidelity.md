@@ -277,7 +277,21 @@ These are the honest holes. None of them is hidden behind a passing test count.
 | `thread.spawn` / `thread.join` / `thread.yield` (0x90–0x92) | **Executed** as of task-19. Wired into the VM against the `thread.zig` scheduler. This is a **deterministic modelled interleave** — no timing, no real concurrency, no speedup claim. |
 | `cap.check` (0x52) | **In flight** at the time of writing — task-20 was wiring it. Do not read this row as a completion claim; check `src/vm.zig` for a `.cap_check` dispatch arm before relying on it. |
 | `cap.load` / `cap.store` (0x50–0x51) | **Decode-only by ruling** (§3.5 Amendment 1.11). The encoding carries no address field, so the simulator refuses them rather than guessing. |
-| Accelerator range 0x60–0x8F (`matrix.*`, `fft.*`, `codec.*`) | Models exist and are tested. **Not assemblable from source, and not executed.** The decoder does build a real payload for these words; see §6.2. |
+| Accelerator range 0x60–0x8F (`matrix.*`, `fft.*`, `codec.*`) | Models exist and are tested (`zig test src/matrix.zig` 7, `src/fft.zig` 8, `src/codec.zig` 10). **Assemblable and disassemblable; not executed.** The decoder builds a real payload for these words; see §6.2. |
+
+> **Correction (v1.18).** This row read "**Not assemblable from source, and not
+> executed.**" The first half is no longer true: `matrix.det R1, R2` assembles
+> cleanly (`celeris64 asm`) and disassembles back to the same text, both verified.
+> The second half is still true and is the real gap.
+>
+> The failure is a plain missing dispatch arm, and it is worth being exact about
+> that because the wording misleads: `run-bin` prints *"the instruction word
+> 0x6012000000000000 could not be decoded"*, which sounds like the decoder rejected
+> the word. It did not — `decoder.decode` returns `.ok{.accelerator}` for it.
+> The message comes from `vm.zig`'s `execute` `else` arm, whose detail sentence is
+> "This opcode is defined by the encoding contract but is not wired into this build
+> yet." So the decode path is already correct and complete; what is missing is the
+> §3.6 dispatch in `vm.execute`, which is where the model calls belong.
 
 The original form of this section said all of the above were "not wired into the
 VM". That was true when written and is no longer true for `thread.*`, so it is

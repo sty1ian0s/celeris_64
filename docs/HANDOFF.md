@@ -101,12 +101,49 @@ Unchanged in priority from the old handoff, minus items 1 and 2:
 
 1. **Wire the accelerators** — the largest remaining core gap, and the last thing
    before the example suite. `matrix.zig`, `fft.zig` and `codec.zig` are imported
-   by **no other file**; `0x60`–`0x8F` decodes to an `Accelerator` payload that
-   `vm.zig`'s `execute` sends to its `else` arm, which faults with "not wired into
-   this build yet". The decoder side is already complete and normative (§3.6
-   amendment 1.1: `rs2[47:44] | rs3[43:40] | reserved[39:32] | count[31:0]`), and
-   `decoder.acceleratorGroup()` already maps `0x60-0x6F` → matrix, `0x70-0x7F` →
-   fft, else codec. So the work is a VM-side dispatch, not a contract change.
+   by **no other file**; `0x60`–`0x8F` assembles and disassembles correctly, but at
+   execution `vm.zig`'s `execute` sends the `.accelerator` payload to its `else`
+   arm, which faults with "not wired into this build yet".
+
+   **The decode path is already correct — do not go looking for a decoder bug.**
+   `decoder.decode` returns `.ok{.accelerator}` for these words with the §3.6
+   fields populated. The `run-bin` message says *"could not be decoded"*, which
+   reads like a decoder rejection and is not one; it is the generic phrasing on
+   `execute`'s `else` arm. Two minutes were spent chasing that red herring this
+   session — the fault is a missing dispatch arm and nothing else.
+
+   **Scope is already fixed by the spec — do not redesign it.** `docs/isa-encoding.md`
+   §3.6 (around line 461) assigns all 13 opcodes with their operands and their exact
+   model signature, derived from the existing modules rather than invented:
+
+   | Range | Ops | Model entry points that already exist |
+   |---|---|---|
+   | `0x60`–`0x64` | `matrix.det/invert/mul/transform/identity` | `src/matrix.zig` |
+   | `0x70`–`0x73` | `fft.forward/inverse`, `fft.ntt`, `fft.ntt.inverse` | `src/fft.zig` |
+   | `0x80`–`0x83` | `codec.compress/decompress/fnv1a/checksum16` | `src/codec.zig` |
+
+   Every one of those model functions already exists and is already tested in its own
+   module. The work is: read a register as an address, derive the element count
+   (`count == 0` means "derive from the destination register" — see §3.6), call the
+   model, write back. Opcodes in `0x60`–`0x8F` **not** in the table are reserved and
+   must keep hitting the fault path rather than becoming a silent no-op.
+
+   Two constraints that will bite: the models take `[]f64`/`[]u8`/`[]Complex` views
+   into the VM's flat `mem.bytes`, and the VM must not allocate inside the execution
+   loop (AGENTS.md §4.1) — so the views come from the memory slice, never from a new
+   allocation. And every failure must render as a plain-language diagnostic naming the
+   operand (AGENTS.md §4.2), not a hex code.
+
+   The RTL half is **already done and is not part of this work.** `rtl/accel.sv`
+   decodes `0x60`–`0x8F` to the §3.6 layout, flags a non-zero reserved field, and
+   raises `err_accel_not_impl_o` for a recognised op / `err_accel_unknown_o` for a
+   reserved byte, with `result_valid_o` tied low. That is the *correct* contract:
+   `docs/isa-encoding.md` §3.6 states the behaviour of these operations "is a
+   **software model**", and `rtl/CROSSCHECK.md` §4/§5.7 records the RTL as
+   deliberately decode-only rather than fabricating a result. So do **not** build
+   matrix/FFT/codec datapaths in SystemVerilog to "complete" this — the existing
+   arrangement is what the contract asks for, and the honest refusal is the point.
+   The VM is the side that is actually missing the dispatch.
 2. **The example suite, analyzers, instruction counter** — the bulk of the goal,
    genuinely unblocked only after 1.
 3. **`cap.*`** stays decode-only. §3.5 v1.12 explains why: the register pair has
